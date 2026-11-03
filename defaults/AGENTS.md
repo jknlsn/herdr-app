@@ -150,8 +150,8 @@ the highlighted line shows where it will land.
   Labels use ids local to that machine; remote ids shown by the app have a
   `<machine>/` prefix (strip it when writing labels on that machine). Adoption
   also enables core keep; `terminal.park` removes the pane and disables keep.
-  When a core change is needed, `terminal.keep` / `terminal.park` acknowledge
-  with `pending: true`, then apply after the machine replies; failures show a toast.
+  `terminal.keep`, `terminal.park` and cross-tab terminal `pane.move` can return
+  `pending: true`: they apply after the machine replies. Failures show a toast.
   Normal quit waits for pending terminal changes and layout writes; remote waits are bounded.
   An id Herdr doesn't know becomes a new space or tab (unnamed: Herdr's names).
   Terminals without the labels (another app's) stay out of Herdr's
@@ -624,6 +624,10 @@ The main ones:
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
+  `pane.move {pane?, tab | target, edge?}` (move beside the tab's focused pane or an explicit
+  target; `edge` is left, right, up or down, default right; an explicit target in the same
+  tab without an edge swaps). A pane stays on its own machine and its terminal keeps running.
+  A cross-tab move shows the destination and closes an emptied source tab or space.
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -642,7 +646,7 @@ The main ones:
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
-  While a layout terminal block is focused, implicit split/close/zoom/go/swap and
+  While a layout terminal block is focused, implicit split/close/move/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).

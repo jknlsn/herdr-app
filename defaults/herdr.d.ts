@@ -56,7 +56,8 @@ export function playSound(sound: string): null;
  * Runs a command, the same ones keys.json binds (`herdr-app commands` lists them all with their
  * arguments). Structural commands fail while their machine's layout is unavailable.
  * Mod props are stored as given, never machine-qualified. Most commands apply right after
- * the call returns; terminal.keep/park finish in the background and toast on failure.
+ * the call returns; terminal.keep/park and cross-tab terminal pane moves finish in the
+ * background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
  * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?}, space.rename {id?, name},
@@ -70,6 +71,8 @@ export function playSound(sound: string): null;
  * With no space shown, a new space is shown even with focus: false.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
+ *   pane.move {pane?, tab | target, edge?: "left" | "right" | "up" | "down"} (same machine;
+ *   right by default, or swap for a same-tab target without an edge),
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},

@@ -91,6 +91,18 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`pane.move {pane?, tab | target, edge?}` moves a pane without stopping its
+terminal. Give either a tab ID (place it beside the focused pane there) or a
+pane ID as `target`. `edge` is left, right, up or down (default right; an
+explicit target in the same tab swaps when no edge is given). Cross-tab moves
+stay on the same machine, show the destination and close an emptied source tab
+or space. For a cross-tab terminal move, `pending: true` means the core has not
+confirmed it yet. Inspect `ls` to confirm the move.
+
+```sh
+herdr-app do pane.move --pane p12 --tab tb7 --edge down
+```
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;

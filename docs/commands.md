@@ -121,6 +121,17 @@ Close a pane and end its terminal.
 |---|---|
 | `pane` | no |
 
+## `pane.move`
+
+Move a pane (default: the focused one) beside a tab's focused pane (`tab`) or another pane (`target`). Give exactly one of `tab` or `target`. `edge` is left, right, up or down (default right; an explicit target in the same tab swaps if no edge is given). A cross-tab move stays on the same machine, shows the destination and closes an emptied source tab or space. The terminal keeps running; a cross-tab terminal move returns `pending` until the core replies.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | no |
+| `target` | no |
+| `edge` | no |
+
 ## `terminal.open`
 
 Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
