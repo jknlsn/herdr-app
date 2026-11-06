@@ -632,6 +632,8 @@ The main ones:
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
   selected); on the zoomed pane it unzooms and focus stays. A tab with one
   pane doesn't zoom, and a zoom ends when its tab is back to one pane.
+  `pane.equalize {tab?}` gives every split in a tab (default: the focused one) equal
+  shares, nested splits too, like Vim's `<C-w>=`; fixed `px` sizes become shares.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
