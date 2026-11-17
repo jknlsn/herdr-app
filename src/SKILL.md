@@ -25,6 +25,8 @@ only after a successful check; on failure, check the connection and retry.
 Package-managed cores are checked but updated through their package manager.
 Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
 it stays dismissed until the error changes or the update recovers.
+`app.test_notification` sends a test system notification. On macOS, it can
+prompt for notification permission; run it when the person is there to answer.
 
 ## Show something when asked
 
@@ -161,6 +163,9 @@ those files or the generated guide. The app rewrites them on start.
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
   is no longer shown. It resolves with `[]` and releases only that call.
+- Mods post native notifications with `systemNotify({ tag, title, body })`,
+  withdraw them with `withdrawSystemNotification(tag)`, and receive clicks
+  as `{ tag }` from `nextSystemNotificationClick()`. Tags belong to the mod.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
