@@ -12,7 +12,7 @@ fn unpainted_hidden_pane(cx: &mut gpui::TestAppContext) {
         this.folders.retain(|id, _| id == "size-probe");
         this.model = crate::model::Model::default();
         let mut tab = super::Tab::new("tab", "", "a", "probe-a");
-        tab.root.split("a", super::Axis::Row, crate::model::pane("b", "probe-b"), "split".into());
+        tab.root.split("a", super::Edge::Right, crate::model::pane("b", "probe-b"), "split".into());
         this.model.add_space("space", "test", "/", tab);
         this.sync(window, cx);
         assert!(!this.terms["b"].view.read(cx).lost);
@@ -88,7 +88,7 @@ fn initial_pane_size_matches_the_rendered_terminal() {
 #[gpui::test]
 fn initial_pane_size(cx: &mut gpui::TestAppContext) {
     use serde_json::json;
-    use super::Axis::{Column, Row};
+    use super::Edge::{Bottom, Left, Right, Top};
     if !running_alone("initial_pane_size") { return; }
     let plain = json!({"id": "context", "type": "block", "content": {"tab": "active"}});
     let framed = json!({"id": "context", "type": "block", "padding": [8, 10],
@@ -102,24 +102,26 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
     let (view, cx) = open_window(cx, "size-probe", "export default () => null;", plain.clone());
     for (label, layout, steps) in [
         ("lone", plain.clone(), vec![]),
-        ("right", plain.clone(), vec![Row]),
-        ("down", plain.clone(), vec![Column]),
-        ("nested", plain.clone(), vec![Row, Column, Row]),
-        ("constrained-max", plain.clone(), vec![Row]),
-        ("constrained-min", plain.clone(), vec![Row]),
-        ("constrained-mixed", plain.clone(), vec![Row, Row]),
+        ("right", plain.clone(), vec![Right]),
+        ("down", plain.clone(), vec![Bottom]),
+        ("left", plain.clone(), vec![Left]),
+        ("up", plain.clone(), vec![Top]),
+        ("nested", plain.clone(), vec![Right, Bottom, Right]),
+        ("constrained-max", plain.clone(), vec![Right]),
+        ("constrained-min", plain.clone(), vec![Right]),
+        ("constrained-mixed", plain.clone(), vec![Right, Right]),
         ("thick-border", json!({"id": "context", "type": "block", "padding": [8, 10],
-            "border": {"width": 20, "color": "border"}, "content": {"tab": "active"}}), vec![Row]),
-        ("headers-padding", framed, vec![Row, Column]),
-        ("main-right", main.clone(), vec![Row]),
-        ("main-down", main.clone(), vec![Column]),
-        ("main-nested", main, vec![Row, Column, Row]),
+            "border": {"width": 20, "color": "border"}, "content": {"tab": "active"}}), vec![Right]),
+        ("headers-padding", framed, vec![Right, Bottom]),
+        ("main-right", main.clone(), vec![Right]),
+        ("main-down", main.clone(), vec![Bottom]),
+        ("main-nested", main, vec![Right, Bottom, Right]),
     ] {
         let mut root = crate::model::pane("a", "probe-a");
         let mut target = "a".to_owned();
-        for (i, &axis) in steps.iter().enumerate().take(steps.len().saturating_sub(1)) {
+        for (i, &edge) in steps.iter().enumerate().take(steps.len().saturating_sub(1)) {
             let next = format!("p{i}");
-            root.split(&target, axis, crate::model::pane(&next, &format!("probe-{next}")), format!("s{i}"));
+            root.split(&target, edge, crate::model::pane(&next, &format!("probe-{next}")), format!("s{i}"));
             target = next;
         }
         view.update_in(cx, |this, window, cx| {
@@ -134,8 +136,8 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
             this.sync(window, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        if let Some(&axis) = steps.last() {
-            root.split(&target, axis, crate::model::pane("new", "probe-new"), "last".into());
+        if let Some(&edge) = steps.last() {
+            root.split(&target, edge, crate::model::pane("new", "probe-new"), "last".into());
             target = "new".into();
         }
         match label {
@@ -175,7 +177,7 @@ fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
     let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
     // Tab "a" has two panes side by side; tab "b" is the one shown.
     let mut root = crate::model::pane("a", "probe-a");
-    root.split("a", super::Axis::Row, crate::model::pane("a2", "probe-a2"), "s".into());
+    root.split("a", super::Edge::Right, crate::model::pane("a2", "probe-a2"), "s".into());
     view.update_in(cx, |this, window, cx| {
         this.folders.retain(|id, _| id == "size-probe");
         this.model = crate::model::Model::default();

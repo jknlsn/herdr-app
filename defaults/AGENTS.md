@@ -122,7 +122,7 @@ the highlighted line shows where it will land.
   If starting in an inherited folder fails, new spaces, tabs and splits retry in
   that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
-  split right and down. One nobody named is called by its place (1, 2,
+  split. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
@@ -622,8 +622,8 @@ The main ones:
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
-- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+- Panes: `pane.split {direction: "left" | "right" | "up" | "down", pane?, argv? | mod?, props?}` (a new
+  terminal or mod pane takes focus; left and up insert before the target), `pane.close {pane?}`,
   `pane.move {pane?, tab | target, edge?}` (move beside the tab's focused pane or an explicit
   target; `edge` is left, right, up or down, default right; an explicit target in the same
   tab without an edge swaps). A pane stays on its own machine and its terminal keeps running.
@@ -647,15 +647,17 @@ The main ones:
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/move/zoom/go/swap and
-  `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
+  `terminal.show` fail, as does `terminal.open` with any split place or `terminal.keep`
+  with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
   Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
   children and keeps children started with `--outlive-parent` running.
   On cores older than 0.1.13, Herdr ends hidden children too, stopping at
   children with a pane or `herdr.space` label.
-- Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`),
+- Terminals: `terminal.open {argv?, folder?, place?, name?}` (place: `tab` by default,
+  or `left`, `right`, `up`, `down` from the focused pane. `folder` sets the starting
+  directory for tabs and splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
   pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,

@@ -30,8 +30,7 @@ pub enum Content {
     Agent { agent: String },
 }
 
-/// Which side of its node a floating block sits on. Left/right make it
-/// vertical, top/bottom horizontal.
+/// Which side of a node a float sits on or a pane splits toward.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Edge {
@@ -45,6 +44,11 @@ pub enum Edge {
 impl Edge {
     pub fn vertical(self) -> bool {
         matches!(self, Edge::Left | Edge::Right)
+    }
+
+    /// The axis of a run split on this edge.
+    pub fn axis(self) -> Axis {
+        if self.vertical() { Axis::Row } else { Axis::Column }
     }
 }
 
@@ -627,9 +631,9 @@ impl Node {
         remove_inner(self, id)
     }
 
-    /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
-    /// if it already runs along that axis, else wraps the target.
-    pub fn split(&mut self, target: &str, axis: Axis, new: Node, container_id: String) -> bool {
+    /// Puts `new` on `edge` of `target`. Reuses a same-axis parent, else wraps the target.
+    pub fn split(&mut self, target: &str, edge: Edge, new: Node, container_id: String) -> bool {
+        let (axis, before) = (edge.axis(), matches!(edge, Edge::Left | Edge::Top));
         if let Some(parent) = self.parent_of(target).map(|p| p.id.clone())
             && let Some(p) = self.find_mut(&parent)
             && p.axis() == Some(axis)
@@ -647,14 +651,15 @@ impl Node {
             }
             let mut new = new;
             new.size = Some(Size::Weight { weight: share / 2.0 });
-            c.insert(i + 1, new);
+            c.insert(if before { i } else { i + 1 }, new);
             return true;
         }
         let Some(t) = self.find_mut(target) else { return false };
         let old = std::mem::replace(t, Node::new(container_id, Kind::Row { children: vec![] }));
         let mut old = old;
         let slot_size = old.size.take();
-        let mut wrapper = Node::container(t.id.clone(), axis, vec![old, new]);
+        let children = if before { vec![new, old] } else { vec![old, new] };
+        let mut wrapper = Node::container(t.id.clone(), axis, children);
         wrapper.size = slot_size;
         *t = wrapper;
         true
@@ -883,13 +888,41 @@ mod tests {
     #[test]
     fn splits_reuse_a_same_axis_parent_and_wrap_otherwise() {
         let mut n = Node::new("tab", Kind::Stack { children: vec![term("a")], active: None, header: None });
-        assert!(n.split("a", Axis::Row, term("b"), "r1".into()));
+        assert!(n.split("a", Edge::Right, term("b"), "r1".into()));
         assert_eq!(n.find("r1").map(|r| r.children().len()), Some(2));
-        assert!(n.split("b", Axis::Row, term("c"), "unused".into()));
+        assert!(n.split("b", Edge::Right, term("c"), "unused".into()));
         assert_eq!(n.find("r1").map(|r| r.children().len()), Some(3));
-        assert!(n.split("c", Axis::Column, term("d"), "c1".into()));
+        assert!(n.split("c", Edge::Bottom, term("d"), "c1".into()));
         assert_eq!(n.find("c1").map(|c| c.children().iter().map(|x| x.id.clone()).collect::<Vec<_>>()), Some(vec!["c".into(), "d".into()]));
         assert_eq!(n.terminals().iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn splits_left_and_up_insert_before_and_share_the_target_slot() {
+        for (edge, axis, perpendicular) in [(Edge::Left, Axis::Row, Axis::Column), (Edge::Top, Axis::Column, Axis::Row)] {
+            let mut solo = term("a");
+            assert!(solo.split("a", edge, term("b"), "run".into()));
+            assert_eq!(solo.axis(), Some(axis));
+            assert_eq!(solo.children(), &[term("b"), term("a")]);
+
+            let mut target = term("a");
+            target.size = Some(Size::Weight { weight: 0.75 });
+            let neighbor = term("neighbor");
+            let mut same = Node::container("run", axis, vec![neighbor.clone(), target.clone()]);
+            assert!(same.split("a", edge, term("b"), "unused".into()));
+            let children = same.children();
+            assert_eq!(children.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["neighbor", "b", "a"]);
+            assert_eq!(children[0], neighbor);
+            assert_eq!(children[1].size, Some(Size::Weight { weight: 0.375 }));
+            assert_eq!(children[2].size, children[1].size);
+
+            let mut cross = Node::container("run", perpendicular, vec![neighbor.clone(), target]);
+            assert!(cross.split("a", edge, term("b"), "wrap".into()));
+            let wrap = &cross.children()[1];
+            assert_eq!((wrap.id.as_str(), wrap.axis(), wrap.size), ("wrap", Some(axis), Some(Size::Weight { weight: 0.75 })));
+            assert_eq!(wrap.children(), &[term("b"), term("a")]);
+            assert_eq!(cross.children()[0], neighbor);
+        }
     }
 
     #[test]
@@ -904,11 +937,11 @@ mod tests {
         b.size = Some(Size::Weight { weight: 0.3 });
         let mut n = Node::container("tab", Axis::Row, vec![a, b]);
         // b split the same way: c takes half of b's share; closing c gives it back.
-        n.split("b", Axis::Row, term("c"), "unused".into());
+        n.split("b", Edge::Right, term("c"), "unused".into());
         n.remove("c");
         assert_eq!((w(&n, "a"), w(&n, "b")), (0.7, 0.3));
         // Closing the first one hands its share to the next.
-        n.split("a", Axis::Row, term("d"), "unused".into());
+        n.split("a", Edge::Right, term("d"), "unused".into());
         n.remove("a");
         assert_eq!((w(&n, "d"), w(&n, "b")), (0.7, 0.3));
     }
@@ -924,7 +957,7 @@ mod tests {
         n.remove("solo");
         assert_eq!(n.active_child().map(|c| c.id.as_str()), Some("t1"));
         // Inside it, a split left with one pane gives way to it.
-        n.split("a", Axis::Column, term("c"), "c1".into());
+        n.split("a", Edge::Bottom, term("c"), "c1".into());
         n.remove("c");
         assert_eq!(n.find("t1").unwrap().children()[0].id, "a");
         n.remove("t1");

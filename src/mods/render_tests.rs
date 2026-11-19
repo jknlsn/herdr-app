@@ -1572,7 +1572,9 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         let tree = describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
         if patch["tab"] == "pane" {
             let at = |label: &str| tree.find(label).unwrap_or_else(|| panic!("{label} missing: {tree}"));
-            assert!(at("Rename") < at("Split right"), "Rename leads the pane menu: {tree}");
+            for label in ["Split left", "Split right", "Split up", "Split down"] {
+                assert!(at("Rename") < at(label), "Rename leads the pane menu: {tree}");
+            }
         }
     }
     eprintln!("18 local-state/overlay cases, each twice: {:?}", start.elapsed());

@@ -69,13 +69,14 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ * Panes: pane.split {direction: "left" | "right" | "up" | "down", pane?} (focuses the new pane),
+ *   pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
  *   pane.move {pane?, tab | target, edge?: "left" | "right" | "up" | "down"} (same machine;
  *   right by default, or swap for a same-tab target without an edge),
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
- * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
+ * Terminals: terminal.open {argv?, folder?, place?: "tab" | "left" | "right" | "up" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
@@ -273,8 +274,9 @@ export interface TerminalSelectionState {
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
- *  Implicit pane split/close/zoom/go/swap and terminal.show fail in that case, as do
- *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
+ *  Implicit pane split/close/move/zoom/go/swap and terminal.show fail in that case, as does
+ *  terminal.open with any split place or terminal.keep with place right/down.
+ *  An explicit pane id targets a model pane.
  *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
  *  the same way (`pane` and `shown` null); implicit pane commands still act on the
  *  focused pane under the window.

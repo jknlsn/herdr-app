@@ -227,7 +227,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::Axis;
+    use crate::layout::Edge;
     fn model() -> Model {
         let mut m = Model::default();
         m.add_space("s", "work", "/work", Tab::new("t", "task", "p", "t1"));
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn focus_zoom_and_settle_are_private() {
         let mut m = model();
-        m.split("p", Axis::Row, "p2", "t2");
+        m.split("p", Edge::Right, "p2", "t2");
         let before = Document::capture(&m, None);
         assert!(m.toggle_zoom("p"));
         m.settle("t", 12);
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn a_single_pane_does_not_restore_zoom() {
         let mut m = model();
-        m.split("p", Axis::Row, "p2", "t2");
+        m.split("p", Edge::Right, "p2", "t2");
         assert!(m.toggle_zoom("p"));
         let saved = View::capture(&m);
 
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn remote_roundtrip_qualifies_only_identity_not_mod_props() {
         let mut m = model();
-        m.split_with("p", Axis::Row, Node::block("mod", Content::Mod { name: "test".into(), props: serde_json::json!({"terminal":"t1"}) }));
+        m.split_with("p", Edge::Right, Node::block("mod", Content::Mod { name: "test".into(), props: serde_json::json!({"terminal":"t1"}) }));
         let doc = Document::capture(&m, None);
         doc.replace(&mut m, Some("mac"));
         assert_eq!(m.address_of("mac/p").as_deref(), Some("mac/t1"));
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn replacement_preserves_valid_view_and_falls_back_when_deleted() {
         let mut m = model();
-        m.split("p", Axis::Row, "p2", "t2");
+        m.split("p", Edge::Right, "p2", "t2");
         let doc = Document::capture(&m, None);
         m.focus_pane("p");
         doc.replace(&mut m, None);
@@ -290,7 +290,7 @@ mod tests {
     fn late_remote_load_restores_only_that_machines_view() {
         let mut m = model();
         Document::capture(&m, None).replace(&mut m, Some("mac"));
-        m.split("mac/p", Axis::Row, "mac/p2", "mac/t2");
+        m.split("mac/p", Edge::Right, "mac/p2", "mac/t2");
         assert!(m.toggle_zoom("mac/p"));
         m.active = Some("mac/s".into());
         let saved = View::capture(&m);
@@ -329,7 +329,7 @@ mod tests {
             let mut m = Model::default();
             read.replace(&mut m, machine);
             let id = |s: &str| qualify(s, machine);
-            m.split(&id("p"), Axis::Row, &id("p2"), &id("t3"));
+            m.split(&id("p"), Edge::Right, &id("p2"), &id("t3"));
             let written = serde_json::to_value(Document::capture(&m, machine)).unwrap();
             assert_eq!(written["spaces"][0]["color"], "teal", "{machine:?}");
             assert_eq!(written["spaces"][0]["tabs"][0]["floating"], text["spaces"][0]["tabs"][0]["floating"], "{machine:?}");

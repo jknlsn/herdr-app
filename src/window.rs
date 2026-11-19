@@ -287,7 +287,7 @@ struct Term {
 }
 
 enum TerminalChange {
-    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
+    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, edge: Edge },
     /// A pane moving to another tab keeps its terminal; only the labels change.
     Move { pane: String, space: String, tab: String, target: String, edge: Edge },
     /// Restore the terminal's placement labels without editing the model.
@@ -2513,7 +2513,7 @@ impl AppWindow {
             let before = tab.before.clone();
             let zoomed = tab.zoomed.clone();
             let id = tab.id.clone();
-            self.model.split(&target, Axis::Row, &pane, addr);
+            self.model.split(&target, Edge::Right, &pane, addr);
             let tab = self.model.tab_mut(&id).unwrap();
             tab.focused = focused;
             tab.before = before;
@@ -2782,7 +2782,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, edge: Edge, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2793,16 +2793,16 @@ impl AppWindow {
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
         let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
-        root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
+        root.split(&target, edge, model::pane(&new, ""), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
         let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.model.split(&target, axis, &new, &addr);
+        self.model.split(&target, edge, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
 
     /// A mod as a pane beside the target (a viewer next to the shell).
-    fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value) -> Result<Value, String> {
+    fn split_mod(&mut self, pane: Option<String>, edge: Edge, name: String, props: Value) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
@@ -2813,7 +2813,7 @@ impl AppWindow {
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
         self.require_document(machine.as_deref())?;
         let new = self.model.fresh_id_on("p", machine.as_deref());
-        self.model.split_with(&target, axis, Node::block(new.clone(), Content::Mod { name, props }));
+        self.model.split_with(&target, edge, Node::block(new.clone(), Content::Mod { name, props }));
         Ok(json!({ "pane": new }))
     }
 
@@ -2890,7 +2890,7 @@ impl AppWindow {
         let (address, place) = (addr.to_owned(), place.to_owned());
         let reply = json!({"pending":true,"terminal":addr,"pane":pane,"tab":ctx});
         self.start_terminal_change(address, TerminalChange::Keep {
-            space, tab: ctx, pane, name, target, axis: if place == "right" { Axis::Row } else { Axis::Column },
+            space, tab: ctx, pane, name, target, edge: if place == "right" { Edge::Right } else { Edge::Bottom },
         }, window, cx);
         Ok(reply)
     }
@@ -2983,7 +2983,7 @@ impl AppWindow {
             return;
         }
         match change {
-            TerminalChange::Keep { space, tab, pane, name, target, axis } => {
+            TerminalChange::Keep { space, tab, pane, name, target, edge } => {
                 if !self.live.contains_key(&address) { return; }
                 if self.model.space(&space).is_none() {
                     if let Err(error) = self.park_terminal(&address, window, cx) {
@@ -2995,7 +2995,7 @@ impl AppWindow {
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
-                        self.model.split(&target, axis, &pane, &address);
+                        self.model.split(&target, edge, &pane, &address);
                     } else {
                         self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
                     }
@@ -3387,14 +3387,13 @@ impl AppWindow {
             }
             // ---- panes
             "pane.split" => {
-                let axis = match Self::arg(a, "direction") {
-                    Some("right") => Axis::Row,
-                    Some("down") => Axis::Column,
-                    other => return self.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
+                let direction = Self::arg(a, "direction");
+                let Some(edge) = direction.and_then(split_edge) else {
+                    return self.fail(format!("pane.split direction is left, right, up or down, not {direction:?}"));
                 };
                 let r = match Self::owned(a, "mod") {
-                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
+                    Some(name) => self.split_mod(Self::owned(a, "pane"), edge, name, a.get("props").cloned().unwrap_or(Value::Null)),
+                    None => self.split(Self::owned(a, "pane"), edge, Self::argv(a), None, window),
                 };
                 self.answer(r);
             }
@@ -3491,10 +3490,9 @@ impl AppWindow {
             // ---- terminals
             "terminal.open" => {
                 let argv = Self::argv(a);
-                let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
-                    _ => {
+                let r = match Self::arg(a, "place").and_then(split_edge) {
+                    Some(edge) => self.split(None, edge, argv, Self::owned(a, "folder"), window),
+                    None => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
@@ -5485,11 +5483,22 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
     }
 }
 
+fn split_edge(direction: &str) -> Option<Edge> {
+    match direction {
+        "left" => Some(Edge::Left),
+        "right" => Some(Edge::Right),
+        "up" => Some(Edge::Top),
+        "down" => Some(Edge::Bottom),
+        _ => None,
+    }
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.move" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
-        "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
+        "terminal.open" => AppWindow::arg(args, "place").and_then(split_edge).is_some(),
+        "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
 }
@@ -6537,6 +6546,10 @@ mod tests {
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
     fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
+    }
+
+    fn open_window_on<'a>(cx: &'a mut gpui::TestAppContext, core: std::sync::Arc<crate::hc::Core>, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         use serde_json::json;
         let home = crate::mods::app_dir();
         crate::mods::write_workspace().unwrap();
@@ -6550,7 +6563,7 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(crate::hc::offline(), requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(core, requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
     }
@@ -7127,7 +7140,7 @@ mod tests {
             this.folders.retain(|id, _| id == "order");
             this.model = crate::model::Model::default();
             let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
-            tab.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "split".into());
+            tab.root.split("p1", super::Edge::Right, crate::model::pane("p2", "t2"), "split".into());
             this.model.add_space("sp1", "", "/tmp", tab);
             this.model.set_word("t1", Some("idle".into()), Some("claude".into()), false);
             this.model.set_word("t2", Some("idle".into()), Some("codex".into()), false);
@@ -7164,7 +7177,7 @@ mod tests {
         }));
         cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(600.0)));
         let mut split = crate::model::Tab::new("tb1", "", "p1", "t1");
-        split.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "row".into());
+        split.root.split("p1", super::Edge::Right, crate::model::pane("p2", "t2"), "row".into());
         view.update_in(cx, |this, window, cx| {
             this.model.add_space("sp1", "", "/tmp", split);
             this.documents.entry(String::new()).or_default().available = true;
@@ -7185,7 +7198,7 @@ mod tests {
             let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "right" }), false, window, cx);
             assert!(r.get("error").is_none(), "{r}");
             assert_ne!(sizes(this), before, "the divider moved");
-            this.model.tab_mut("tb1").unwrap().root.split("p1", super::Axis::Column, crate::model::pane("p3", "t3"), "col".into());
+            this.model.tab_mut("tb1").unwrap().root.split("p1", super::Edge::Bottom, crate::model::pane("p3", "t3"), "col".into());
             this.sync(window, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -7300,7 +7313,7 @@ mod tests {
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
-            assert!(this.model.split("pa", crate::layout::Axis::Row, "pb", "t2"));
+            assert!(this.model.split("pa", crate::layout::Edge::Right, "pb", "t2"));
             this.model.select_tab("a");
             assert!(this.model.focus_pane("pa"));
             this.sync(window, cx);
@@ -7332,6 +7345,85 @@ mod tests {
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
+    }
+
+    #[test]
+    fn terminal_open_splits_in_each_direction_and_launches_directly() {
+        in_own_process("terminal_open_splits");
+    }
+
+    #[gpui::test]
+    fn terminal_open_splits(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("terminal_open_splits") {
+            return;
+        }
+        let (core, runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.select_tab("a");
+            this.sync(window, cx);
+        }));
+        let argv = json!(["node", "tool.js"]);
+        for (place, axis, before) in [
+            ("right", super::Axis::Row, false),
+            ("down", super::Axis::Column, false),
+            ("left", super::Axis::Row, true),
+            ("up", super::Axis::Column, true),
+        ] {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                let target = this.model.focused_pane().unwrap();
+                let r = this.run_as("terminal.open", json!({ "argv": argv, "place": place }), false, window, cx);
+                assert!(r.get("terminal").is_some(), "{place}: {r}");
+                let pane = r["pane"].as_str().unwrap();
+                assert_eq!(this.model.focused_pane().as_deref(), Some(pane), "{place}");
+                let parent = this.model.active_tab().unwrap().root.parent_of(pane).unwrap();
+                assert_eq!(parent.axis(), Some(axis), "{place}");
+                let pair = if before { [pane, target.as_str()] } else { [target.as_str(), pane] };
+                assert!(parent.children().windows(2).any(|nodes| [nodes[0].id.as_str(), nodes[1].id.as_str()] == pair), "{place}");
+            }));
+            assert_eq!(runs.try_recv().unwrap(), argv, "{place}");
+        }
+    }
+
+    #[test]
+    fn pane_splits_place_and_focus_the_new_pane() {
+        in_own_process("pane_splits_left_and_up");
+    }
+
+    #[gpui::test]
+    fn pane_splits_left_and_up(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_splits_left_and_up") {
+            return;
+        }
+        let (core, _) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "export default () => null;", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.sync(window, cx);
+            let left = this.run_as("pane.split:left", json!({}), false, window, cx);
+            assert!(left.get("terminal").is_some(), "{left}");
+            let new = left["pane"].as_str().unwrap();
+            assert_eq!(this.model.focused_pane().as_deref(), Some(new));
+            let root = &this.model.active_tab().unwrap().root;
+            assert_eq!(root.children().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), [new, "pa"]);
+
+            let up = this.run_as("pane.split", json!({ "direction": "up", "pane": "pa", "mod": "board" }), false, window, cx);
+            let board = up["pane"].as_str().unwrap_or_else(|| panic!("{up}"));
+            assert_eq!(this.model.focused_pane().as_deref(), Some(board));
+            let root = &this.model.active_tab().unwrap().root;
+            let wrap = &root.children()[1];
+            assert_eq!(wrap.axis(), Some(super::Axis::Column));
+            assert_eq!(wrap.children().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), [board, "pa"]);
+        }));
     }
 
     /// `tab.new {mod, focus: false}` adds the tab at the end of its space,
@@ -7780,8 +7872,8 @@ export default class Probe extends View {
             "id": "context", "type": "block", "content": { "tab": "active" }
         }));
         let mut tab = super::Tab::new("tab", "", "a", "term-a");
-        tab.root.split("a", super::Axis::Row, pane("b", "term-b"), "row".into());
-        tab.root.split("b", super::Axis::Column, pane("c", "term-c"), "column".into());
+        tab.root.split("a", super::Edge::Right, pane("b", "term-b"), "row".into());
+        tab.root.split("b", super::Edge::Bottom, pane("c", "term-c"), "column".into());
         tab.focus("c");
         tab.zoomed = Some("c".into());
         view.update_in(cx, |this, window, cx| {
@@ -8299,10 +8391,10 @@ export default class Probe extends View { render() { return div().child("probe")
     }
 
     fn swap_model() -> super::Model {
-        use crate::layout::Axis;
+        use crate::layout::Edge;
         let mut m = super::Model::default();
         m.add_space("s1", "api", "/src", super::Tab::new("c1", "", "x1", "t1"));
-        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x1", Edge::Right, "x2", "t2");
         m.add_tab("s1", super::Tab::new("c2", "", "x3", "t3"));
         m.select_tab("c1");
         m.focus_pane("x1");
@@ -8365,6 +8457,10 @@ export default class Probe extends View { render() { return div().child("probe")
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
         assert!(super::needs_model_pane("pane.go", &json!({"pane": "explicit-pane"})));
+        for place in ["left", "up"] {
+            assert!(super::needs_model_pane("terminal.open", &json!({"place": place})), "{place}");
+            assert!(!super::needs_model_pane("terminal.keep", &json!({"place": place})), "{place}");
+        }
         for name in ["terminal.open", "terminal.keep"] {
             for place in ["right", "down"] {
                 assert!(super::needs_model_pane(name, &json!({"place": place})), "{name} {place}");
@@ -8446,7 +8542,7 @@ export default class Probe extends View { render() { return div().child("probe")
         });
         view.update_in(cx, |this, window, cx| {
             // A mod pane has no terminal to relabel: it moves right away.
-            this.model.split_with("x2", super::Axis::Row, super::Node::block("x9", super::Content::Mod { name: "viewer".into(), props: json!({}) }));
+            this.model.split_with("x2", super::Edge::Right, super::Node::block("x9", super::Content::Mod { name: "viewer".into(), props: json!({}) }));
             let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "gone"}), false, window, cx);
             assert_eq!(reply, json!({ "pane": "x9", "tab": "gone" }), "{reply}");
             assert_eq!(this.model.tab_of("x9").unwrap().id, "gone");
@@ -8507,7 +8603,7 @@ export default class Probe extends View { render() { return div().child("probe")
 
     #[gpui::test]
     fn pane_move_failures(cx: &mut gpui::TestAppContext) {
-        use super::{Axis, Edge, Tab, TerminalChange};
+        use super::{Edge, Tab, TerminalChange};
         use crate::mirror::Document;
         use serde_json::json;
         if !running_alone("pane_move_failures") {
@@ -8519,7 +8615,7 @@ export default class Probe extends View { render() { return div().child("probe")
         view.update_in(cx, |this, window, cx| {
             this.model = crate::model::Model::default();
             this.model.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
-            this.model.split("x1", Axis::Row, "x2", "t2");
+            this.model.split("x1", Edge::Right, "x2", "t2");
             assert!(this.model.toggle_zoom("x1"));
             let dest = || Tab::new("c2", "", "x3", "t3");
             this.model.add_space("s2", "web", "/src", dest());
