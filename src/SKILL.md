@@ -87,6 +87,10 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+Splitting or closing a pane keeps its row or column even if it was already
+even. It does not rebalance hand-resized runs or fixed-pixel slots. Set
+`pane_autobalance` to `false` in settings.json to disable this.
+
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
 the focused one) and its neighbor in a direction, or `target`, another pane of
 the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
@@ -101,7 +105,8 @@ pane ID as `target`. `edge` is left, right, up or down (default right; an
 explicit target in the same tab swaps when no edge is given). Cross-tab moves
 stay on the same machine, show the destination and close an emptied source tab
 or space. For a cross-tab terminal move, `pending: true` means the core has not
-confirmed it yet. Inspect `ls` to confirm the move.
+confirmed it yet. Inspect `ls` to confirm the move. Moves to an edge apply
+`pane_autobalance` to the source and destination runs, even across tabs.
 
 ```sh
 herdr-app do pane.move --pane p12 --tab tb7 --edge down

@@ -864,6 +864,15 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `pane_autobalance` (default `true`, Settings → Look): when a pane is split
+  or closed, keep its row or column even if it was even before. Same-axis
+  subtrees count by pane, perpendicular subtrees count as one, and fixed-pixel
+  slots are skipped. If the divider positions were uneven, a split takes half
+  the target's share and a close gives the freed share to the previous neighbor
+  (or the next if it was first). Dragging a pane to an edge or using `pane.move`
+  to place it beside another pane applies the same rule to the source and
+  destination runs, even across tabs. Set `false` to always use the old split
+  and close behavior.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

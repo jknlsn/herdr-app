@@ -665,6 +665,102 @@ impl Node {
         true
     }
 
+    /// Apply a pane edit, then rebalance its same-axis run if it was even.
+    /// `Some(axis)` for a split; `None` for a removal (the parent's axis is used).
+    pub fn with_autobalance<T>(&mut self, target: &str, split_axis: Option<Axis>, enabled: bool, edit: impl FnOnce(&mut Node) -> T) -> T {
+        let run = if enabled { self.even_run(target, split_axis) } else { None };
+        let result = edit(self);
+        if let Some((id, axis)) = run
+            && let Some(run) = self.find_mut(&id)
+        {
+            run.balance_run(axis);
+        }
+        result
+    }
+
+    fn even_run(&self, target: &str, split_axis: Option<Axis>) -> Option<(String, Axis)> {
+        let path = self.path_to(target)?;
+        let (_, parents) = path.split_last()?;
+        let (parent, ancestors) = parents.split_last()?;
+        let mut run = self.find(parent)?;
+        let axis = run.axis()?;
+        // A perpendicular split starts a fresh run, already even.
+        if split_axis.is_some_and(|split| split != axis) {
+            return None;
+        }
+        for id in ancestors.iter().rev() {
+            let parent = self.find(id)?;
+            if parent.axis() != Some(axis) || run.flex_weight().is_none() {
+                break;
+            }
+            run = parent;
+        }
+        run.run_is_even(axis, [0.0, 1.0], [0.0, 1.0]).then(|| (run.id.clone(), axis))
+    }
+
+    fn flex_weight(&self) -> Option<f32> {
+        match self.size {
+            Some(Size::Px { .. }) => None,
+            Some(Size::Weight { weight }) => Some(weight),
+            None => Some(1.0),
+        }
+    }
+
+    fn same_axis_weight(&self, axis: Axis) -> usize {
+        if self.axis() != Some(axis) {
+            return 1;
+        }
+        // A flexible slot containing only fixed children still takes a share.
+        self.run_shares(axis).map(|(_, _, units)| units).sum::<usize>().max(1)
+    }
+
+    fn run_shares(&self, axis: Axis) -> impl Iterator<Item = (&Node, f32, usize)> {
+        self.children().iter().filter_map(move |child| {
+            child.flex_weight().map(|weight| (child, weight, child.same_axis_weight(axis)))
+        })
+    }
+
+    fn run_totals(&self, axis: Axis) -> (f64, usize) {
+        self.run_shares(axis).fold((0.0, 0), |(w, n), (_, weight, count)| (w + f64::from(weight), n + count))
+    }
+
+    fn run_is_even(&self, axis: Axis, current: [f64; 2], even: [f64; 2]) -> bool {
+        // Compare cumulative divider positions in the run's normalized weight
+        // space. Pixel slots and their contents are outside that space.
+        const EPSILON: f64 = 1e-4;
+        let (total, units) = self.run_totals(axis);
+        let (mut used, mut counted) = (0.0, 0);
+        let (mut from_current, mut from_even) = (current[0], even[0]);
+        self.run_shares(axis).all(|(child, weight, count)| {
+            if !weight.is_finite() || weight <= 0.0 {
+                return false;
+            }
+            used += f64::from(weight);
+            counted += count;
+            let to_current = current[0] + (current[1] - current[0]) * (used / total);
+            let to_even = even[0] + (even[1] - even[0]) * (counted as f64 / units as f64);
+            let matches = (to_current - to_even).abs() <= EPSILON
+                && (child.axis() != Some(axis) || child.run_is_even(axis, [from_current, to_current], [from_even, to_even]));
+            (from_current, from_even) = (to_current, to_even);
+            matches
+        })
+    }
+
+    fn balance_run(&mut self, axis: Axis) {
+        if self.axis() != Some(axis) {
+            return;
+        }
+        let (total, units) = self.run_totals(axis);
+        for child in self.children_mut().unwrap() {
+            let Some(old) = child.flex_weight() else { continue };
+            let weight = (total * (child.same_axis_weight(axis) as f64 / units as f64)) as f32;
+            if old != weight {
+                child.size = Some(Size::Weight { weight });
+            }
+            child.balance_run(axis);
+        }
+    }
+
     /// Makes `child` the visible child of `stack`.
     pub fn select(&mut self, stack: &str, child: &str) -> bool {
         if let Some(s) = self.find_mut(stack)
@@ -944,6 +1040,174 @@ mod tests {
         n.split("a", Edge::Right, term("d"), "unused".into());
         n.remove("a");
         assert_eq!((w(&n, "d"), w(&n, "b")), (0.7, 0.3));
+    }
+
+    fn row(id: &str, children: Vec<Node>) -> Node {
+        Node::container(id, Axis::Row, children)
+    }
+
+    fn sized(mut node: Node, weight: f32) -> Node {
+        node.size = Some(Size::Weight { weight });
+        node
+    }
+
+    fn assert_weights(root: &Node, expected: &[f32]) {
+        let actual = root.children().iter().filter_map(Node::flex_weight).collect::<Vec<_>>();
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
+
+    fn split_row(root: &mut Node, target: &str, new: &str, balance: bool) {
+        assert!(root.with_autobalance(target, Some(Axis::Row), balance, |root| root.split(target, Edge::Right, term(new), "split".into())));
+    }
+
+    fn close(root: &mut Node, target: &str, balance: bool) {
+        assert!(root.with_autobalance(target, None, balance, |root| root.remove(target)).is_some());
+    }
+
+    #[test]
+    fn even_columns_stay_even_on_split_and_close() {
+        let mut root = row("tab", vec![term("a"), term("b")]);
+        split_row(&mut root, "b", "c", true);
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+        close(&mut root, "c", true);
+        assert_weights(&root, &[1.0; 2]);
+    }
+
+    #[test]
+    fn even_rows_stay_even_on_split_and_close() {
+        let mut root = Node::container("tab", Axis::Column, vec![term("a"), term("b")]);
+        assert!(root.with_autobalance("b", Some(Axis::Column), true, |root| {
+            root.split("b", Edge::Bottom, term("c"), "split".into())
+        }));
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+        close(&mut root, "c", true);
+        assert_weights(&root, &[1.0; 2]);
+    }
+
+    #[test]
+    fn resized_columns_keep_legacy_split_and_close_shares() {
+        let mut root = row("tab", vec![sized(term("a"), 0.75), sized(term("b"), 0.25)]);
+        split_row(&mut root, "b", "c", true);
+        assert_weights(&root, &[0.75, 0.125, 0.125]);
+        close(&mut root, "c", true);
+        assert_weights(&root, &[0.75, 0.25]);
+    }
+
+    #[test]
+    fn autobalance_counts_same_axis_leaves_and_reaches_the_top_of_the_run() {
+        let nested = sized(row("nested", vec![term("b"), term("c")]), 2.0);
+        let mut root = row("tab", vec![term("a"), nested]);
+        split_row(&mut root, "b", "d", true);
+        assert_weights(&root, &[0.75, 2.25]);
+        assert_weights(root.find("nested").unwrap(), &[2.0 / 3.0; 3]);
+        close(&mut root, "d", true);
+        assert_weights(&root, &[1.0, 2.0]);
+        assert_weights(root.find("nested").unwrap(), &[1.0; 2]);
+        close(&mut root, "c", true);
+        assert!(root.find("nested").is_none(), "the inner split collapses");
+        assert_weights(&root, &[1.5; 2]);
+    }
+
+    #[test]
+    fn an_uneven_nested_divider_disables_balance_for_the_run() {
+        let nested = sized(row("nested", vec![sized(term("b"), 1.5), sized(term("c"), 0.5)]), 2.0);
+        let mut root = row("tab", vec![term("a"), nested.clone()]);
+        split_row(&mut root, "a", "d", true);
+        assert_weights(&root, &[0.5, 0.5, 2.0]);
+        assert_eq!(root.find("nested"), Some(&nested));
+    }
+
+    #[test]
+    fn perpendicular_subtrees_count_as_one_and_keep_their_ratios() {
+        let column = Node::container("column", Axis::Column, vec![sized(term("b"), 2.0), term("c")]);
+        let mut root = row("tab", vec![term("a"), column.clone()]);
+        split_row(&mut root, "a", "d", true);
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+        assert_eq!(root.find("column").unwrap().children(), column.children());
+        // Starting another row inside the column must not rebalance the outer row.
+        split_row(&mut root, "b", "e", true);
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+        assert_weights(root.find("column").unwrap(), &[2.0, 1.0]);
+        assert_weights(root.find("split").unwrap(), &[1.0; 2]);
+    }
+
+    #[test]
+    fn closing_a_perpendicular_split_does_not_rebalance_a_newly_joined_run() {
+        let inner = row("inner", vec![term("c"), term("d")]);
+        let column = Node::container("column", Axis::Column, vec![term("b"), inner.clone()]);
+        let mut root = row("tab", vec![term("a"), column]);
+        close(&mut root, "b", true);
+        // The outer run keeps its old slots: A takes half, C and D take a quarter each.
+        assert_eq!(root.children(), &[term("a"), inner]);
+        assert!(root.even_run("c", Some(Axis::Row)).is_none());
+    }
+
+    #[test]
+    fn closing_a_pane_can_collapse_a_perpendicular_split_to_a_leaf() {
+        let column = Node::container("column", Axis::Column, vec![term("b"), term("c")]);
+        let mut root = row("tab", vec![term("a"), sized(column, 2.0)]);
+        close(&mut root, "b", true);
+        assert_eq!(root.children(), &[term("a"), sized(term("c"), 2.0)]);
+    }
+
+    #[test]
+    fn splitting_a_fixed_pixel_target_balances_only_the_flexible_panes() {
+        let mut fixed = term("fixed");
+        fixed.size = Some(Size::Px { px: 260.0 });
+        let mut root = row("tab", vec![term("a"), fixed.clone(), term("b")]);
+        split_row(&mut root, "fixed", "c", true);
+        assert_eq!(root.children()[1], fixed);
+        assert_weights(&root, &[2.5 / 3.0; 3]);
+    }
+
+    #[test]
+    fn fixed_pixel_slots_and_their_contents_stay_out_of_balance() {
+        let mut fixed = row("fixed", vec![sized(term("x"), 3.0), term("y")]);
+        fixed.size = Some(Size::Px { px: 260.0 });
+        let mut root = row("tab", vec![term("a"), fixed.clone(), term("b")]);
+        split_row(&mut root, "b", "c", true);
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+        assert_eq!(root.find("fixed"), Some(&fixed));
+        close(&mut root, "c", true);
+        assert_weights(&root, &[1.0; 2]);
+        assert_eq!(root.find("fixed"), Some(&fixed));
+    }
+
+    #[test]
+    fn autobalance_inside_a_fixed_pixel_slot_does_not_reach_the_outer_run() {
+        let mut fixed = row("fixed", vec![term("x"), term("y")]);
+        fixed.size = Some(Size::Px { px: 260.0 });
+        let mut root = row("tab", vec![sized(term("a"), 3.0), fixed, term("b")]);
+        split_row(&mut root, "x", "z", true);
+        assert_weights(&root, &[3.0, 1.0]);
+        let fixed = root.find("fixed").unwrap();
+        assert_eq!(fixed.size, Some(Size::Px { px: 260.0 }));
+        assert_weights(fixed, &[2.0 / 3.0; 3]);
+    }
+
+    #[test]
+    fn autobalance_can_be_disabled_for_an_even_run() {
+        let mut root = row("tab", vec![term("a"), term("b")]);
+        split_row(&mut root, "b", "c", false);
+        assert_weights(&root, &[1.0, 0.5, 0.5]);
+        let mut root = row("tab", vec![term("a"), term("b"), term("c")]);
+        close(&mut root, "c", false);
+        assert_weights(&root, &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn divider_tolerance_ignores_rounding_but_not_accumulated_movement() {
+        let mut root = row("tab", vec![sized(term("a"), 1.0001), sized(term("b"), 0.9999)]);
+        split_row(&mut root, "b", "c", true);
+        assert_weights(&root, &[2.0 / 3.0; 3]);
+
+        let mut root = row("tab", vec![sized(term("a"), 1.0003), sized(term("b"), 1.0003), sized(term("c"), 0.9997), sized(term("d"), 0.9997)]);
+        // Each share is close, but the middle divider is too far from even.
+        close(&mut root, "d", true);
+        assert_weights(&root, &[1.0003, 1.0003, 1.9994]);
     }
 
     #[test]

@@ -2513,7 +2513,7 @@ impl AppWindow {
             let before = tab.before.clone();
             let zoomed = tab.zoomed.clone();
             let id = tab.id.clone();
-            self.model.split(&target, Edge::Right, &pane, addr);
+            self.model.split(&target, Edge::Right, &pane, addr, self.person.pane_autobalance);
             let tab = self.model.tab_mut(&id).unwrap();
             tab.focused = focused;
             tab.before = before;
@@ -2614,7 +2614,7 @@ impl AppWindow {
                 return self.sync(window, cx);
             }
             if closed && self.model.address_of(block).as_deref() == Some(t.address.as_str()) {
-                self.model.remove_pane(block);
+                self.model.remove_pane(block, self.person.pane_autobalance);
                 return self.sync(window, cx);
             }
         }
@@ -2793,11 +2793,14 @@ impl AppWindow {
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
         let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
-        root.split(&target, edge, model::pane(&new, ""), "initial-size".into());
+        let autobalance = self.person.pane_autobalance;
+        root.with_autobalance(&target, Some(edge.axis()), autobalance, |root| {
+            root.split(&target, edge, model::pane(&new, ""), "initial-size".into())
+        });
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
         let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.model.split(&target, edge, &new, &addr);
+        self.model.split(&target, edge, &new, &addr, autobalance);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
 
@@ -2813,7 +2816,7 @@ impl AppWindow {
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
         self.require_document(machine.as_deref())?;
         let new = self.model.fresh_id_on("p", machine.as_deref());
-        self.model.split_with(&target, edge, Node::block(new.clone(), Content::Mod { name, props }));
+        self.model.split_with(&target, edge, Node::block(new.clone(), Content::Mod { name, props }), self.person.pane_autobalance);
         Ok(json!({ "pane": new }))
     }
 
@@ -2851,7 +2854,7 @@ impl AppWindow {
                 };
                 if closed {
                     self.notify_launch_failure(&addr, window, cx);
-                    self.model.remove_pane(&pane);
+                    self.model.remove_pane(&pane, self.person.pane_autobalance);
                     changed = true;
                 }
             }
@@ -2928,14 +2931,15 @@ impl AppWindow {
         }
         self.require_document(dest.machine.as_deref())?;
         let (space, tab) = (dest.id.clone(), to.clone());
+        let autobalance = self.person.pane_autobalance;
         if from.id == tab {
-            if !self.model.move_pane(&pane, &target, edge) { return Err("could not move the pane".into()); }
+            if !self.model.move_pane(&pane, &target, edge, autobalance) { return Err("could not move the pane".into()); }
         } else if let Some(address) = self.model.address_of(&pane) {
             if self.changing_terminals.contains(&address) { return Err("This terminal already has a pane change in progress.".into()); }
             let reply = json!({ "pending": true, "terminal": address, "pane": pane, "tab": tab });
             self.start_terminal_change(address, TerminalChange::Move { pane, space, tab, target, edge: edge.unwrap_or(Edge::Right) }, window, cx);
             return Ok(reply);
-        } else if !self.model.move_pane_to(&pane, &target, edge.unwrap_or(Edge::Right)) {
+        } else if !self.model.move_pane_to(&pane, &target, edge.unwrap_or(Edge::Right), autobalance) {
             return Err("could not move the pane".into());
         }
         Ok(json!({ "pane": pane, "tab": tab }))
@@ -2995,7 +2999,7 @@ impl AppWindow {
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
-                        self.model.split(&target, edge, &pane, &address);
+                        self.model.split(&target, edge, &pane, &address, self.person.pane_autobalance);
                     } else {
                         self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
                     }
@@ -3006,12 +3010,13 @@ impl AppWindow {
                 if self.closing_terminals.contains_key(&address) || self.model.address_of(&pane).as_deref() != Some(&address) {
                     return;
                 }
+                let autobalance = self.person.pane_autobalance;
                 let moved = if let Some(dest) = self.model.space(&space).and_then(|s| s.tab(&tab)) {
                     if dest.root.find(&pane).is_some() { return; }
                     let target = if dest.root.find(&target).is_some_and(Node::is_pane) { Some(target) } else { dest.focused_pane() };
-                    target.is_some_and(|target| self.model.move_pane_to(&pane, &target, edge))
+                    target.is_some_and(|target| self.model.move_pane_to(&pane, &target, edge, autobalance))
                 } else {
-                    self.model.move_pane_to_new_tab(&pane, &space, &tab)
+                    self.model.move_pane_to_new_tab(&pane, &space, &tab, autobalance)
                 };
                 if !moved {
                     // Placement failed after relabeling: restore the labels for the pane's current tab.
@@ -3027,7 +3032,7 @@ impl AppWindow {
             }
             TerminalChange::Relabel { .. } => return,
             TerminalChange::Park => {
-                if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
+                if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane, self.person.pane_autobalance); }
             }
         }
         if !self.draining {
@@ -3408,7 +3413,7 @@ impl AppWindow {
                     return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
                 }
                 let addr = self.model.address_of(&pane);
-                self.model.remove_pane(&pane);
+                self.model.remove_pane(&pane, self.person.pane_autobalance);
                 self.close_terminals(addr.into_iter().collect(), cx);
             }
             "pane.move" => {
@@ -7313,7 +7318,7 @@ mod tests {
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
-            assert!(this.model.split("pa", crate::layout::Edge::Right, "pb", "t2"));
+            assert!(this.model.split("pa", crate::layout::Edge::Right, "pb", "t2", true));
             this.model.select_tab("a");
             assert!(this.model.focus_pane("pa"));
             this.sync(window, cx);
@@ -7345,6 +7350,72 @@ mod tests {
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
+    }
+
+    #[test]
+    fn pane_autobalance_applies_to_remote_split_and_close_commands() {
+        in_own_process("pane_autobalance_commands");
+    }
+
+    #[gpui::test]
+    fn pane_autobalance_commands(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_autobalance_commands") {
+            return;
+        }
+        let (core, _runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            let mut tab = crate::model::Tab::new("vps/tab", "", "vps/a", "vps/t1");
+            tab.root.split("vps/a", super::Edge::Right, crate::model::pane("vps/b", "vps/t2"), "unused".into());
+            this.model.add_space("vps/space", "", "/work", tab);
+            this.model.space_mut("vps/space").unwrap().machine = Some("vps".into());
+            this.documents_watching = true;
+            let slot = this.documents.entry("vps".into()).or_default();
+            slot.connected = true;
+            slot.available = true;
+            slot.document = Some(crate::mirror::Document::capture(&this.model, Some("vps")));
+            this.sync(window, cx);
+        });
+
+        let command = |cx: &mut gpui::VisualTestContext, name, args| {
+            let reply = view.update_in(cx, |this, window, cx| this.run_as(name, args, false, window, cx));
+            cx.run_until_parked();
+            assert!(reply.get("error").is_none(), "{reply}");
+            reply
+        };
+        // Each accepted write contains both the topology edit and the sizes.
+        let weights = |cx: &mut gpui::VisualTestContext, version, ids: &[&str]| view.update(cx, |this, _| {
+            let slot = &this.documents["vps"];
+            assert_eq!(slot.version, version);
+            let doc = serde_json::to_value(slot.document.as_ref().unwrap()).unwrap();
+            let children = doc["spaces"][0]["tabs"][0]["root"]["children"].as_array().unwrap();
+            assert_eq!(children.iter().map(|n| n["id"].as_str().unwrap()).collect::<Vec<_>>(), ids);
+            children.iter().map(|n| n["size"]["weight"].as_f64().unwrap()).collect::<Vec<_>>()
+        });
+        let args = json!({"pane":"vps/b","direction":"right"});
+        let split = command(cx, "pane.split", args.clone());
+        let pane = split["pane"].as_str().unwrap();
+        let local = pane.strip_prefix("vps/").unwrap();
+        let balanced = weights(cx, 1, &["a", "b", local]);
+        assert_eq!(balanced, [balanced[0]; 3]);
+
+        command(cx, "pane.close", json!({"pane":pane}));
+        let balanced = weights(cx, 2, &["a", "b"]);
+        assert_eq!(balanced, [balanced[0]; 2]);
+
+        view.update_in(cx, |this, window, cx| {
+            std::fs::write(crate::settings::path(), r#"{"pane_autobalance":false}"#).unwrap();
+            this.watched.settings = None;
+            this.files_changed(vec!["settings.json".into()], window, cx);
+        });
+        let split = command(cx, "pane.split", args);
+        let local = split["pane"].as_str().unwrap().strip_prefix("vps/").unwrap();
+        let legacy = weights(cx, 3, &["a", "b", local]);
+        assert_eq!(legacy, [balanced[0], balanced[1] / 2.0, balanced[1] / 2.0]);
     }
 
     #[test]
@@ -8394,7 +8465,7 @@ export default class Probe extends View { render() { return div().child("probe")
         use crate::layout::Edge;
         let mut m = super::Model::default();
         m.add_space("s1", "api", "/src", super::Tab::new("c1", "", "x1", "t1"));
-        m.split("x1", Edge::Right, "x2", "t2");
+        m.split("x1", Edge::Right, "x2", "t2", true);
         m.add_tab("s1", super::Tab::new("c2", "", "x3", "t3"));
         m.select_tab("c1");
         m.focus_pane("x1");
@@ -8542,7 +8613,7 @@ export default class Probe extends View { render() { return div().child("probe")
         });
         view.update_in(cx, |this, window, cx| {
             // A mod pane has no terminal to relabel: it moves right away.
-            this.model.split_with("x2", super::Edge::Right, super::Node::block("x9", super::Content::Mod { name: "viewer".into(), props: json!({}) }));
+            this.model.split_with("x2", super::Edge::Right, super::Node::block("x9", super::Content::Mod { name: "viewer".into(), props: json!({}) }), true);
             let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "gone"}), false, window, cx);
             assert_eq!(reply, json!({ "pane": "x9", "tab": "gone" }), "{reply}");
             assert_eq!(this.model.tab_of("x9").unwrap().id, "gone");
@@ -8615,7 +8686,7 @@ export default class Probe extends View { render() { return div().child("probe")
         view.update_in(cx, |this, window, cx| {
             this.model = crate::model::Model::default();
             this.model.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
-            this.model.split("x1", Edge::Right, "x2", "t2");
+            this.model.split("x1", Edge::Right, "x2", "t2", true);
             assert!(this.model.toggle_zoom("x1"));
             let dest = || Tab::new("c2", "", "x3", "t3");
             this.model.add_space("s2", "web", "/src", dest());
@@ -8650,7 +8721,7 @@ export default class Probe extends View { render() { return div().child("probe")
             assert_eq!(source.focused_pane().as_deref(), Some("x2"));
             assert_eq!(this.model.focused_pane().as_deref(), Some("x1"));
 
-            this.model.remove_pane("x1");
+            this.model.remove_pane("x1", true);
             let after_close = Document::capture(&this.model, None);
             this.apply_terminal_change("t1".into(), change(), Ok(()), window, cx);
             assert_eq!(Document::capture(&this.model, None), after_close);

@@ -584,8 +584,8 @@ pub fn offline() -> Arc<Core> {
     })
 }
 
-/// An in-process core for window tests. Records argv from `terminal.run`,
-/// returns a new terminal address, and answers other calls with `{}`.
+/// An in-process core for window tests. Records argv from `terminal.run` and
+/// returns a new terminal address. Answers `doc.set` with a new version, else `{}`.
 #[cfg(test)]
 pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
     let (writer, frames) = mpsc::channel::<Vec<u8>>();
@@ -599,7 +599,10 @@ pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
             let Some(Ok(req)) = frame.get(HEADER..).map(serde_json::from_slice::<Value>) else { continue };
             let result = if req["method"] == "terminal.run" {
                 let _ = runs_tx.send(req["params"]["argv"].clone());
-                json!({ "address": format!("t{}", 100 + n) })
+                let address = format!("t{}", 100 + n);
+                json!({ "address": crate::mirror::qualify(&address, req["params"]["on"].as_str()) })
+            } else if req["method"] == "doc.set" {
+                json!({ "version": req["params"]["version"].as_u64().unwrap() + 1 })
             } else {
                 json!({})
             };

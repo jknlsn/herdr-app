@@ -73,7 +73,8 @@ export function playSound(sound: string): null;
  *   pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
  *   pane.move {pane?, tab | target, edge?: "left" | "right" | "up" | "down"} (same machine;
- *   right by default, or swap for a same-tab target without an edge),
+ *   right by default, or swap for a same-tab target without an edge; edge moves apply
+ *   pane_autobalance to the source and destination runs),
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "left" | "right" | "up" | "down"}, terminal.kill {terminal},
