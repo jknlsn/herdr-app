@@ -141,6 +141,7 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
             for (key, value) in args {
+                // `pane.move` takes a tab ID; `space.new` uses `tab` for a name.
                 let string_arg = matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target")
                     || (c.name == "pane.move" && matches!(key.as_str(), "tab" | "edge"));
                 if string_arg && !value.is_string() && !value.is_null() {

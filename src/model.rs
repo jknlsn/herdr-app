@@ -447,12 +447,12 @@ impl Model {
             return false;
         }
         let Some((_, empty)) = self.take_pane(source) else { return false };
+        let Some(tab) = self.tab_of_mut(target) else { return false };
+        tab.root = root;
+        tab.zoomed = None;
         if let Some(empty) = empty {
             self.remove_tab(&empty);
         }
-        let tab = self.tab_of_mut(target).unwrap();
-        tab.root = root;
-        tab.zoomed = None;
         self.focus_pane(source)
     }
 

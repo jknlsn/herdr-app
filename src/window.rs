@@ -290,7 +290,13 @@ enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     /// A pane moving to another tab keeps its terminal; only the labels change.
     Move { pane: String, space: String, tab: String, target: String, edge: Edge },
+    /// Restore the terminal's placement labels without editing the model.
+    Relabel { space: String, tab: String },
     Park,
+}
+
+fn move_labels(space: &str, tab: &str, machine: Option<&str>) -> Value {
+    json!({ "herdr.space": crate::mirror::local(space, machine), "herdr.tab": crate::mirror::local(tab, machine) })
 }
 
 struct PendingTerminalChange {
@@ -2916,16 +2922,15 @@ impl AppWindow {
         let to = &tab_for_pane(&target).ok_or_else(|| format!("no pane {target:?}"))?.id;
         let source = self.model.space_of(&from.id).ok_or("no space holding the source pane")?;
         let dest = self.model.space_of(to).ok_or("no space holding the destination pane")?;
-        let machine = dest.machine.as_deref();
-        let address = self.model.address_of(&pane);
-        if source.machine != dest.machine || (from.id != *to && address.as_ref().is_some_and(|a| a.split_once('/').map(|(m, _)| m) != machine)) {
+        // A pane belongs to its space's machine and layout document.
+        if source.machine != dest.machine {
             return Err("A pane must stay on its own machine.".into());
         }
-        self.require_document(machine)?;
+        self.require_document(dest.machine.as_deref())?;
         let (space, tab) = (dest.id.clone(), to.clone());
         if from.id == tab {
             if !self.model.move_pane(&pane, &target, edge) { return Err("could not move the pane".into()); }
-        } else if let Some(address) = address {
+        } else if let Some(address) = self.model.address_of(&pane) {
             if self.changing_terminals.contains(&address) { return Err("This terminal already has a pane change in progress.".into()); }
             let reply = json!({ "pending": true, "terminal": address, "pane": pane, "tab": tab });
             self.start_terminal_change(address, TerminalChange::Move { pane, space, tab, target, edge: edge.unwrap_or(Edge::Right) }, window, cx);
@@ -2938,12 +2943,9 @@ impl AppWindow {
 
     fn start_terminal_change(&mut self, address: String, change: TerminalChange, window: &mut Window, cx: &mut Context<Self>) {
         let machine = address.split_once('/').map(|(m, _)| m);
-        let labels_for = |space: &str, tab: &str| json!({
-            "herdr.space": crate::mirror::local(space, machine), "herdr.tab": crate::mirror::local(tab, machine),
-        });
         let (keep, labels) = match &change {
-            TerminalChange::Keep { space, tab, .. } => (Some(true), labels_for(space, tab)),
-            TerminalChange::Move { space, tab, .. } => (None, labels_for(space, tab)),
+            TerminalChange::Keep { space, tab, .. } => (Some(true), move_labels(space, tab, machine)),
+            TerminalChange::Move { space, tab, .. } | TerminalChange::Relabel { space, tab } => (None, move_labels(space, tab, machine)),
             TerminalChange::Park => (Some(false), json!({"herdr.space":"","herdr.tab":""})),
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3012,13 +3014,18 @@ impl AppWindow {
                     self.model.move_pane_to_new_tab(&pane, &space, &tab)
                 };
                 if !moved {
-                    // The destination space went away: leave the terminal running without a pane, like Keep.
-                    if let Err(error) = self.park_terminal(&address, window, cx) {
-                        tracing::error!("cannot undo pane move: {error}");
+                    // Placement failed after relabeling: restore the labels for the pane's current tab.
+                    if let (Some(space), Some(tab)) = (self.model.space_of(&pane), self.model.tab_of(&pane)) {
+                        let restore = TerminalChange::Relabel { space: space.id.clone(), tab: tab.id.clone() };
+                        self.start_terminal_change(address, restore, window, cx);
+                    }
+                    if !self.draining {
+                        self.layout_notice("Could not move pane", "The pane stayed in its current tab.", window, cx);
                     }
                     return;
                 }
             }
+            TerminalChange::Relabel { .. } => return,
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
             }
@@ -8483,6 +8490,75 @@ export default class Probe extends View { render() { return div().child("probe")
             assert_eq!(roundtrip.tab_of("x1").unwrap().id, "gone");
             assert_eq!(roundtrip.address_of("x1").as_deref(), Some("t1"));
             assert!(!roundtrip.tab("gone").unwrap().root.parent_of("x1").unwrap().id.contains('/'));
+        });
+    }
+
+    #[test]
+    fn pane_move_labels_use_ids_local_to_the_core() {
+        let labels = serde_json::json!({ "herdr.space": "s1", "herdr.tab": "tb1" });
+        assert_eq!(super::move_labels("s1", "tb1", None), labels);
+        assert_eq!(super::move_labels("vps/s1", "vps/tb1", Some("vps")), labels);
+    }
+
+    #[test]
+    fn pane_move_failures_run_in_their_own_window() {
+        in_own_process("pane_move_failures");
+    }
+
+    #[gpui::test]
+    fn pane_move_failures(cx: &mut gpui::TestAppContext) {
+        use super::{Axis, Edge, Tab, TerminalChange};
+        use crate::mirror::Document;
+        use serde_json::json;
+        if !running_alone("pane_move_failures") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        view.update_in(cx, |this, window, cx| {
+            this.model = crate::model::Model::default();
+            this.model.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
+            this.model.split("x1", Axis::Row, "x2", "t2");
+            assert!(this.model.toggle_zoom("x1"));
+            let dest = || Tab::new("c2", "", "x3", "t3");
+            this.model.add_space("s2", "web", "/src", dest());
+            let change = || TerminalChange::Move { pane: "x1".into(), space: "s2".into(), tab: "c2".into(), target: "x3".into(), edge: Edge::Right };
+            let before = Document::capture(&this.model, None);
+
+            this.changing_terminals.insert("t1".into());
+            this.apply_terminal_change("t1".into(), change(), Err("core refused relabel".into()), window, cx);
+            assert!(!this.changing_terminals.contains("t1"));
+            assert_eq!(Document::capture(&this.model, None), before);
+
+            this.closing_terminals.insert("t1".into(), false);
+            this.apply_terminal_change("t1".into(), change(), Ok(()), window, cx);
+            assert_eq!(Document::capture(&this.model, None), before);
+            assert!(this.pending_terminals.is_empty());
+            this.closing_terminals.remove("t1");
+
+            this.model.remove_space("s2");
+            let before = Document::capture(&this.model, None);
+            this.apply_terminal_change("t1".into(), change(), Ok(()), window, cx);
+            let repair = this.pending_terminals.remove("t1").expect("restore the original labels");
+            assert!(matches!(&repair.change, TerminalChange::Relabel { space, tab } if space == "s1" && tab == "c1"));
+            this.apply_terminal_change("t1".into(), repair.change, Ok(()), window, cx);
+            assert!(!this.changing_terminals.contains("t1"));
+            assert_eq!(Document::capture(&this.model, None), before);
+            assert_eq!(this.model.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
+
+            this.model.add_space("s2", "web", "/src", dest());
+            this.apply_terminal_change("t1".into(), change(), Ok(()), window, cx);
+            let source = this.model.tab("c1").unwrap();
+            assert_eq!(source.zoomed, None);
+            assert_eq!(source.focused_pane().as_deref(), Some("x2"));
+            assert_eq!(this.model.focused_pane().as_deref(), Some("x1"));
+
+            this.model.remove_pane("x1");
+            let after_close = Document::capture(&this.model, None);
+            this.apply_terminal_change("t1".into(), change(), Ok(()), window, cx);
+            assert_eq!(Document::capture(&this.model, None), after_close);
+            assert!(this.pending_terminals.is_empty());
         });
     }
 
