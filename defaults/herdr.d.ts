@@ -174,6 +174,7 @@ export interface Program {
   agent: boolean;
 }
 
+/** Optional report fields come from the root (id-less) OSC 7501 report. Reports with an id are not included. */
 export interface AgentInfo {
   address: string;
   pane: string;
@@ -190,6 +191,14 @@ export interface AgentInfo {
   program: Program;
   /** The terminal's title. */
   title: string;
+  /** Short message from the report, if sent. */
+  msg?: string;
+  /** Reason from the report, if sent. Only sent when blocked. */
+  kind?: "permission" | "question" | "auth";
+  /** Progress (0..100), if sent. Only sent when working or blocked. */
+  progress?: number;
+  /** Title from the report, if sent. */
+  report_title?: string;
   /** Its pane's name (`pane.rename`), or null. */
   pane_name: string | null;
   /** Higher = changed more recently. */

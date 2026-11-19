@@ -1198,8 +1198,10 @@ All of it is in `herdr.d.ts`. In short:
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
-  `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
-  once someone looks at it on any Herdr client), `terminals()`
+  `agents()` (status, app, space, tab, pinned, focused, `title` = the terminal's
+  title; `msg`, `kind`, `progress`, and `report_title` from the root (id-less)
+  OSC 7501 report, only if sent; reports with an id are not included; "done"
+  turns "idle" once someone looks at it on any Herdr client), `terminals()`
   (every core terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
