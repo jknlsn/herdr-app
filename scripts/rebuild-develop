@@ -1,0 +1,244 @@
+#!/bin/bash
+set -euo pipefail
+
+FEATURES=(
+  feat/system-notifications
+  feat/pane-equalize
+  feat/pane-move
+  feat/split-left-up:feat/pane-move
+  feat/autobalance:feat/split-left-up
+  feat/agent-report-fields
+  chore/local-release
+)
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/rebuild-develop [--apply] [--force]
+Preview the weekly fork rebuild. Pass --apply to update the local branches.
+--force: discard non-merge commits only on develop.
+Set REBUILD_BRANCHES to a space-separated list to replace the feature list.
+Use branch for a feature based on main, or branch:base for a feature stacked
+on a branch listed earlier. Only stack tops are merged into develop.
+This script never pushes.
+USAGE
+}
+
+fail() {
+  printf 'rebuild-develop: %s\n' "$*" >&2
+  exit 1
+}
+
+apply=false
+force=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --apply) apply=true ;;
+    --force) force=true ;;
+    *) usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+if [[ -n ${REBUILD_BRANCHES:-} ]]; then
+  read -r -a FEATURES <<< "$REBUILD_BRANCHES"
+fi
+[[ -n ${FEATURES[0]:-} ]] || fail 'REBUILD_BRANCHES must name at least one branch'
+
+cd -P "$(git rev-parse --show-toplevel)"
+IFS= read -r -d '' first < <(git worktree list --porcelain -z) || fail 'cannot find the main clone'
+root=${first#worktree }
+
+worktree_for() {
+  local line path= git_dir head_name ref="refs/heads/$1"
+  while IFS= read -r -d '' line; do
+    case "$line" in
+      'worktree '*) path=${line#worktree } ;;
+      "branch $ref") printf '%s' "$path"; return 0 ;;
+      detached)
+        # A rebase detaches HEAD, but still reserves its original branch.
+        git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || continue
+        for head_name in "$git_dir"/{rebase-merge,rebase-apply}/head-name; do
+          if [[ -f $head_name && $(<"$head_name") == "$ref" ]]; then
+            printf '%s' "$path"
+            return 0
+          fi
+        done
+        ;;
+    esac
+  done < <(git worktree list --porcelain -z)
+}
+
+require_ready() {
+  local status git_dir
+  git_dir=$(git -C "$1" rev-parse --absolute-git-dir) || fail "cannot check $1"
+  if [[ -e $git_dir/MERGE_HEAD || -e $git_dir/CHERRY_PICK_HEAD || -e $git_dir/REVERT_HEAD || -d $git_dir/rebase-merge || -d $git_dir/rebase-apply ]]; then
+    fail "$1 has a rebase or merge in progress; finish or abort it first"
+  fi
+  status=$(git --no-optional-locks -C "$1" status --porcelain --untracked-files=normal) || fail "cannot check $1"
+  [[ -z $status ]] || fail "$1 is dirty; commit or stash its changes first"
+}
+
+require_fast_forward() {
+  git merge-base --is-ancestor refs/heads/main refs/remotes/upstream/master ||
+    fail 'main cannot fast-forward to upstream/master; check for local commits or a missing upstream/master'
+}
+
+print_command() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run() {
+  print_command "$@"
+  if $apply; then "$@"; fi
+}
+
+if ! $apply; then printf 'Dry run: using pre-fetch refs; no branches will change.\n'; fi
+require_ready "$root"
+if [[ $PWD != "$root" ]]; then require_ready "$PWD"; fi
+if develop_tip=$(git rev-parse --verify --quiet refs/heads/develop); then
+  path=$(worktree_for develop)
+  [[ -z $path || $path == "$root" ]] || fail "develop is checked out in $path; free it before rebuilding"
+fi
+main_tip=$(git rev-parse --verify --quiet refs/heads/main) || fail 'missing local branch main'
+main_path=$(worktree_for main)
+if [[ -n $main_path ]]; then require_ready "$main_path"; fi
+branches=()
+old_tips=()
+base_indexes=()
+has_children=()
+for i in "${!FEATURES[@]}"; do
+  entry=${FEATURES[i]}
+  branch=${entry%%:*}
+  case "$branch" in '' | main | develop | -*) fail "not a feature branch: $branch" ;; esac
+  base_index=-1
+  for ((j=0; j<i; j++)); do
+    [[ ${branches[j]} != "$branch" ]] || fail "duplicate feature branch: $branch"
+    if [[ $entry == *:* && ${branches[j]} == "${entry#*:}" ]]; then base_index=$j; fi
+  done
+  if [[ $entry == *:* ]]; then
+    [[ $base_index -ge 0 ]] || fail "base for $branch must be a feature branch listed earlier: ${entry#*:}"
+    has_children[base_index]=true
+  fi
+  branches[i]=$branch
+  base_indexes[i]=$base_index
+  old_tips[i]=$(git rev-parse --verify --quiet "refs/heads/$branch") || fail "missing local branch $branch"
+  path=$(worktree_for "$branch")
+  if [[ -n $path ]]; then require_ready "$path"; fi
+done
+require_fast_forward
+
+# Before rebasing, exclude integration merges and commits reachable from the old feature tips.
+if [[ -n $develop_tip ]]; then
+  count=$(git rev-list --count --no-merges "$develop_tip" --not "$main_tip" "${old_tips[@]}")
+  if [[ $count -gt 0 ]]; then
+    printf 'Warning: resetting develop discards %s non-merge commit(s) only on develop.\n' "$count" >&2
+    if $apply && ! $force; then fail 'review those commits and rerun with --force to discard them'; fi
+  fi
+fi
+
+if [[ $(git -C "$root" config --bool rerere.enabled || true) != true ]]; then
+  printf 'Tip: enable reuse of conflict resolutions with git config rerere.enabled true.\n'
+fi
+run git -C "$root" fetch upstream --tags
+if $apply; then require_fast_forward; fi
+if [[ -n $main_path ]]; then
+  run git -C "$main_path" merge --ff-only upstream/master
+else
+  # Update the branch by fast-forward without checking it out or resetting a worktree.
+  run git -C "$root" fetch --no-tags --no-write-fetch-head . refs/remotes/upstream/master:refs/heads/main
+fi
+
+merges=()
+empty=()
+for i in "${!branches[@]}"; do
+  branch=${branches[i]}
+  base_index=${base_indexes[i]}
+  args=(main)
+  if [[ $base_index -ge 0 ]]; then
+    base=${branches[base_index]}
+    if [[ ${empty[base_index]:-} ]]; then base=main; fi
+    # Exclude the old base's commits even though its branch has already moved.
+    args=(--onto "$base" "${old_tips[base_index]}")
+  fi
+  path=$(worktree_for "$branch")
+  path=${path:-$root}
+  # An earlier rebase may have switched branches in the main clone.
+  if [[ $path == "$root" ]]; then args+=("$branch"); fi
+  if ! run git -C "$path" rebase "${args[@]}"; then
+    printf 'rebuild-develop: rebase of %s stopped in %s.\n' "$branch" "$path" >&2
+    resume_stack=false
+    for ((j=i+1; j<${#branches[@]}; j++)); do
+      base_index=${base_indexes[j]}
+      if [[ $base_index -lt 0 ]]; then continue; fi
+      if ! $resume_stack; then
+        printf 'Resolve and stage conflicts, run git rebase --continue there, then run these stack rebases before rerunning this script.\n' >&2
+        resume_stack=true
+      fi
+      next_path=$(worktree_for "${branches[j]}")
+      print_command git -C "${next_path:-$root}" rebase --onto "${branches[base_index]}" "${old_tips[base_index]}" "${branches[j]}" >&2
+    done
+    if ! $resume_stack; then
+      printf 'Resolve and stage conflicts, run git rebase --continue there, then rerun this script.\n' >&2
+    fi
+    printf 'If %s was merged upstream, run git rebase --abort and remove it from FEATURES/REBUILD_BRANCHES.\n' "$branch" >&2
+    if [[ ${has_children[i]:-} ]]; then
+      printf 'If so, after the abort move its stack onto main:\n' >&2
+      for ((j=i+1; j<${#branches[@]}; j++)); do
+        base_index=${base_indexes[j]}
+        [[ $base_index -ge 0 ]] || continue
+        next_path=$(worktree_for "${branches[j]}")
+        if [[ $base_index -eq $i ]]; then
+          print_command git -C "${next_path:-$root}" rebase --onto main "${old_tips[i]}" "${branches[j]}" >&2
+        else
+          print_command git -C "${next_path:-$root}" rebase --onto "${branches[base_index]}" "${old_tips[base_index]}" "${branches[j]}" >&2
+        fi
+      done
+      printf 'then make its direct children plain entries and remove %s.\n' "$branch" >&2
+    fi
+    printf 'If the rerun warns about develop-only commits from features that were already rebased, rerun with --force.\n' >&2
+    exit 1
+  fi
+  count=$(git rev-list --count "refs/heads/main..refs/heads/$branch")
+  if [[ $count -eq 0 ]]; then
+    empty[i]=true
+    if [[ ${has_children[i]:-} ]]; then
+      printf '%s is empty (merged upstream?); its children rebase onto main. Skipping its merge.\n' "$branch"
+    else
+      printf '%s is empty (merged upstream?); remove it from FEATURES/REBUILD_BRANCHES. Skipping its merge.\n' "$branch"
+    fi
+  elif [[ ! ${has_children[i]:-} ]]; then
+    merges+=("$i")
+  fi
+done
+
+require_ready "$root"
+run git -C "$root" checkout -B develop main
+for ((i=0; i<${#merges[@]}; i++)); do
+  index=${merges[i]}
+  branch=${branches[index]}
+  included=
+  for ((j=base_indexes[index]; j>=0; j=base_indexes[j])); do
+    if [[ ! ${empty[j]:-} ]]; then included="${branches[j]}${included:+, $included}"; fi
+  done
+  if [[ -n $included ]]; then printf '%s also brings in %s.\n' "$branch" "$included"; fi
+  if ! run git -C "$root" merge --no-ff --no-edit "$branch"; then
+    printf 'rebuild-develop: merge of %s stopped in %s.\n' "$branch" "$root" >&2
+    printf 'Resolve and stage conflicts, run git merge --continue there, then run any remaining commands below.\n' >&2
+    for ((j=i+1; j<${#merges[@]}; j++)); do
+      index=${merges[j]}
+      print_command git -C "$root" merge --no-ff --no-edit "${branches[index]}" >&2
+    done
+    printf 'A rerun of this script restarts develop from main.\n' >&2
+    exit 1
+  fi
+done
+
+if $apply; then
+  printf 'Rebuilt develop from main with %s feature merge(s).\n' "${#merges[@]}"
+else
+  printf 'Would rebuild develop from main with %s feature merge(s), based on pre-fetch refs.\n' "${#merges[@]}"
+fi
+printf 'After applying, run in %s:\n  cargo test --locked\n  scripts/local-release\n' "$root"
