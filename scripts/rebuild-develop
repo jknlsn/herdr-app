@@ -242,3 +242,7 @@ else
   printf 'Would rebuild develop from main with %s feature merge(s), based on pre-fetch refs.\n' "${#merges[@]}"
 fi
 printf 'After applying, run in %s:\n  cargo test --locked\n  scripts/local-release\n' "$root"
+if $apply && [[ -e $root/.codecontext/AGENTS.md ]]; then
+  printf 'Agent: in .codecontext/AGENTS.md, set the line to:\n  Last synced with upstream: %s, `main` = `%s` (%s).\n' \
+    "$(date +%F)" "$(git rev-parse --short refs/heads/main)" "$(git describe --tags refs/heads/main)"
+fi
