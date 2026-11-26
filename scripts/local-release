@@ -1,0 +1,119 @@
+#!/bin/bash
+# Host load: one cargo build at a time per machine (GPUI + Ghostty via Zig).
+# On a shared machine, set CARGO_BUILD_JOBS (e.g. 8) and reuse one
+# CARGO_TARGET_DIR across worktrees.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/local-release [--dest <path to .app>]
+Build and sign a local macOS bundle. Default: /Applications/Herdr.app
+(refuses to replace a bundle that is not com.jknlsn.herdr, e.g. the official app)
+LOCAL_APP_CODESIGN_IDENTITY sets the signing identity (default: the first
+Developer ID Application identity in the keychain).
+LOCAL_APP_ICON replaces the app icon with an .icns file kept outside the repo.
+
+Run one cargo build at a time per machine (GPUI + Ghostty via Zig).
+On a shared machine, set CARGO_BUILD_JOBS (e.g. 8) and reuse one
+CARGO_TARGET_DIR across worktrees.
+USAGE
+}
+
+app=/Applications/Herdr.app
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --dest)
+      app=${2:-}
+      app=${app%/}
+      [[ $app == *.app ]] || { echo 'local-release: --dest needs a path ending in .app' >&2; exit 1; }
+      shift 2
+      ;;
+    *) echo "local-release: unknown argument $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+[[ $(uname -s) == Darwin ]] || { echo 'local-release: requires macOS' >&2; exit 1; }
+[[ $app == /* ]] || app="$PWD/$app"
+
+require_local_destination() {
+  if [[ -e $app || -L $app ]]; then
+    local identifier
+    if [[ -d $app && ! -L $app ]] &&
+      identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null) &&
+      [[ $identifier == com.jknlsn.herdr ]]; then
+      return
+    fi
+    printf 'local-release: refusing to replace %s (not a com.jknlsn.herdr bundle)\n' "$app" >&2
+    exit 1
+  fi
+}
+require_local_destination
+icon=${LOCAL_APP_ICON:-}
+[[ -z $icon || $icon == /* ]] || icon="$PWD/$icon"
+if [[ -n $icon && ! -f $icon ]]; then
+  printf 'local-release: LOCAL_APP_ICON not found: %s\n' "$icon" >&2
+  exit 1
+fi
+id=${LOCAL_APP_CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application:/ {print $2; exit}')}
+[[ -n $id ]] || { echo 'local-release: no Developer ID Application identity; set LOCAL_APP_CODESIGN_IDENTITY' >&2; exit 1; }
+cd "$(dirname "$0")/.."
+
+if version=$(git describe --tags --dirty 2>/dev/null); then
+  version=${version#v}
+else
+  version=$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)
+fi
+
+# Keep the updater, telemetry and feedback off. HERDR_RELEASES_URL also
+# enables update checks at runtime, so do not put it in LSEnvironment.
+unset HERDR_APP_RELEASE HERDR_RELEASES_URL
+cargo build --release --locked
+
+target=${CARGO_TARGET_DIR:-target}
+mkdir -p "$target/local-release"
+work=$(mktemp -d "$target/local-release/stage.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+staged="$work/Herdr.app"
+mkdir -p "$staged/Contents/MacOS" "$staged/Contents/Resources"
+cp "$target/release/herdr-app" "$staged/Contents/MacOS/Herdr"
+cp assets/icons/Herdr.icns LICENSE THIRD-PARTY-NOTICES "$staged/Contents/Resources/"
+if [[ -n $icon ]]; then cp "$icon" "$staged/Contents/Resources/Herdr.icns"; fi
+
+plist="$staged/Contents/Info.plist"
+# The bundled Ghostty VT library targets macOS 13.0.
+cat > "$plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleExecutable</key><string>Herdr</string>
+    <key>CFBundleIdentifier</key><string>com.jknlsn.herdr</string>
+    <key>CFBundleName</key><string>Herdr</string>
+    <key>CFBundleDisplayName</key><string>Herdr</string>
+    <key>CFBundleIconFile</key><string>Herdr</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSMicrophoneUsageDescription</key><string>Terminal programs running in Herdr can use the microphone, for example for voice input.</string>
+    <key>NSCameraUsageDescription</key><string>Terminal programs running in Herdr can use the camera.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Terminal programs running in Herdr can use AppleScript to control other apps.</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>LSEnvironment</key><dict/>
+</dict></plist>
+PLIST
+plutil -insert CFBundleShortVersionString -string "$version" "$plist"
+plutil -insert CFBundleVersion -string "$version" "$plist"
+# Finder does not inherit a login shell's PATH; hc must still be discoverable.
+plutil -insert LSEnvironment.PATH -string "$HOME/.local/bin:/opt/homebrew/bin:$PATH" "$plist"
+
+# QuickJS needs the allow-jit entitlement for MAP_JIT under hardened runtime.
+codesign --force --options runtime --entitlements scripts/macos-entitlements.plist --sign "$id" "$staged"
+codesign --verify --deep --strict "$staged"
+codesign -dv --verbose=4 "$staged" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier)='
+
+mkdir -p "$(dirname "$app")"
+rm -rf "$app.new"
+ditto "$staged" "$app.new"
+require_local_destination
+rm -rf "$app"
+mv "$app.new" "$app"
+printf 'Installed %s. Quit and reopen Herdr to use it; the core and its sessions keep running.\n' "$app"
