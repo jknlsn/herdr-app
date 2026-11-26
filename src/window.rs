@@ -1991,15 +1991,21 @@ impl AppWindow {
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
                     }));
-                    let Some(status) = m.status(addr) else { continue };
-                    agents.push(json!({
+                    let Some((a, status)) = a.zip(m.status(addr)) else { continue };
+                    let mut info = json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx), "pane_name": p.title,
-                        "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
-                        "seq": a.map(|a| a.seq).unwrap_or(0),
+                        "status": status, "app": a.app, "program": self.program(addr), "title": title.unwrap_or_default(),
+                        "seq": a.seq,
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
-                    }));
+                    });
+                    for (field, key) in [("msg", "msg"), ("kind", "kind"), ("progress", "progress"), ("title", "report_title")] {
+                        if let Some(value) = a.report.get(field).filter(|v| !v.is_null()) {
+                            info[key] = value.clone();
+                        }
+                    }
+                    agents.push(info);
                 }
             }
         }
@@ -2359,14 +2365,13 @@ impl AppWindow {
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
-            let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
-            changed |= self.model.set_word(addr, word, app, looking);
+            changed |= self.model.set_word(addr, word, rec.get("report"), looking);
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
@@ -7234,8 +7239,8 @@ export default class extends View {
             let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
             tab.root.split("p1", super::Edge::Right, crate::model::pane("p2", "t2"), "split".into());
             this.model.add_space("sp1", "", "/tmp", tab);
-            this.model.set_word("t1", Some("idle".into()), Some("claude".into()), false);
-            this.model.set_word("t2", Some("idle".into()), Some("codex".into()), false);
+            this.model.set_word("t1", Some("idle".into()), Some(&json!({"state":"idle","app":"claude"})), false);
+            this.model.set_word("t2", Some("idle".into()), Some(&json!({"state":"idle","app":"codex"})), false);
         }));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -7975,6 +7980,69 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(false)), "hidden");
             cx.simulate_visibility_change(Visible);
             assert_eq!(seen(cx), Some(json!(true)), "shown again");
+        }
+    }
+
+    #[test]
+    fn mods_see_the_current_agent_report() {
+        in_own_process("agent_report_fields");
+    }
+
+    #[gpui::test]
+    fn agent_report_fields(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("agent_report_fields") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { agents, setShared } from "herdr";
+export default class Probe extends View {
+  render() {
+    setShared("probe.agents", agents());
+    return div();
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "probe", probe, json!({ "id": "probe", "type": "block", "content": { "mod": "probe" } }));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.sync(window, cx);
+            this.terms["pa"].view.update(cx, |term, _| term.title = "Terminal title".into());
+        });
+        let full = json!({
+            "state": "error", "app": "claude-code", "kind": "permission",
+            "msg": "Try again", "progress": 0, "title": "Agent title",
+        });
+        let read = |report: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.terminals_listed(
+                    json!({"terminals": [{"address": "t1", "state": "live", "status": report}]}),
+                    window,
+                    cx,
+                );
+                assert_eq!(this.model.agents["t1"].report, report);
+            });
+            cx.run_until_parked();
+            crate::mods::shared("probe.agents").unwrap()[0].clone()
+        };
+        let info = read(full.clone(), cx);
+        assert_eq!(info["status"], "blocked");
+        assert_eq!(info["app"], "claude-code");
+        assert_eq!(info["title"], "Terminal title");
+        assert_eq!(info["report_title"], "Agent title");
+        for key in ["kind", "msg", "progress"] {
+            assert_eq!(info.get(key), full.get(key), "{key}: {info}");
+        }
+
+        let minimal = read(json!({"state": "error"}), cx);
+        assert_eq!(minimal["seq"], info["seq"], "same state, same order");
+        assert_eq!(minimal["app"], "claude-code", "last reported app is retained");
+        assert_eq!(minimal["title"], "Terminal title");
+        let legacy = read(json!("working"), cx);
+        assert_eq!(legacy["status"], "working");
+        for key in ["kind", "msg", "progress", "report_title"] {
+            assert!(minimal.get(key).is_none(), "{key}: {minimal}");
+            assert!(legacy.get(key).is_none(), "{key}: {legacy}");
         }
     }
 

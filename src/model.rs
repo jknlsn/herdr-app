@@ -65,8 +65,10 @@ pub enum Alert {
 pub struct Agent {
     /// The program's 7501 word (working, idle, done, blocked, error), if it reports.
     pub word: Option<String>,
-    /// The agent's name from its 7501 report (`app`), e.g. "claude-code".
+    /// The last name the agent reported (`app`), e.g. "claude-code".
     pub app: Option<String>,
+    /// Core's root (id-less) OSC 7501 report or legacy word, as exposed by `terminals()`.
+    pub report: Value,
     /// Whether the person has seen it since it last stopped working.
     pub seen: bool,
     /// Core's turn counter: goes up each time it stops working.
@@ -576,10 +578,16 @@ impl Model {
         self.tabs().flat_map(|c| addresses(&c.root)).collect()
     }
 
-    /// Applies a status word from core (Herdr's seen rules).
-    pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, looking: bool) -> bool {
+    /// Keeps the latest report; returns true only on a change of status word.
+    pub fn set_word(&mut self, address: &str, word: Option<String>, report: Option<&Value>, looking: bool) -> bool {
         let a = self.agents.entry(address.to_owned()).or_insert_with(|| Agent { seen: true, ..Default::default() });
-        a.app = app.or(a.app.take());
+        let report = report.unwrap_or(&Value::Null);
+        if &a.report != report {
+            a.report.clone_from(report);
+            if let Some(app) = report.get("app").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                a.app = Some(app.to_owned());
+            }
+        }
         if a.word == word {
             return false;
         }
@@ -1224,7 +1232,7 @@ mod tests {
     #[test]
     fn finishes_you_did_not_watch_are_done_until_seen() {
         let mut m = model_with_one();
-        m.set_word("t1", Some("working".into()), Some("claude".into()), false);
+        m.set_word("t1", Some("working".into()), Some(&json!({"state":"working","app":"claude"})), false);
         assert_eq!(m.status("t1"), Some("working"));
         m.set_word("t1", Some("idle".into()), None, false);
         assert_eq!(m.status("t1"), Some("done"));
