@@ -156,7 +156,10 @@ impl NotificationCenter {
         });
         self.center
             .requestAuthorizationWithOptions_completionHandler(
-                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                // HERDR: without Badge, macOS hides the Dock badge mods set with setBadge.
+                UNAuthorizationOptions::Alert
+                    | UNAuthorizationOptions::Sound
+                    | UNAuthorizationOptions::Badge,
                 &completion,
             );
     }
