@@ -55,6 +55,10 @@ herdr-app do agent.select --index 3
 `agent.select` uses the same navigation order as `agent.next` (1 = first).
 In `keys.json`, `agent.select:3` selects the third agent in that order.
 
+`pane.equalize` gives every split in the focused tab equal shares again,
+nested splits included. Pass `--tab <id>` (from `ls`) for another tab; an
+unknown ID fails and changes nothing.
+
 For a remote space:
 
 ```sh
