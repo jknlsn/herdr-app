@@ -560,7 +560,22 @@ export default class Settings extends View {
           this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`, by(-step), by(step)),
         );
       }))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Panes"))
+      .child(
+        this.row(
+          t,
+          "Balance panes automatically",
+          "Keep evenly sized panes even when a pane opens or closes. Leave resized panes alone.",
+          this.toggle(t, "st-pane-autobalance", p.pane_autobalance !== false, (_e, cx) =>
+            this.change((q) => {
+              if (q.pane_autobalance === false) delete q.pane_autobalance;
+              else q.pane_autobalance = false;
+            }, cx),
+          ),
+        ),
+      );
   }
 
   keyboard(t) {

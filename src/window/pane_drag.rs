@@ -135,7 +135,7 @@ impl AppWindow {
         }
         if self.pane_movable(&d.pane)
             && let Some((target, edge)) = target
-            && self.model.move_pane(&d.pane, &target, edge)
+            && self.model.move_pane(&d.pane, &target, edge, self.person.pane_autobalance)
         {
             self.sync(window, cx);
         }

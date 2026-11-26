@@ -47,13 +47,16 @@ even when the tab bar shows the program or its session title.
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
-herdr-app do pane.split --direction right --pane p12
+herdr-app do pane.split --direction left --pane p12
 herdr-app do agent.focus --terminal t7
 herdr-app do agent.select --index 3
 ```
 
 `agent.select` uses the same navigation order as `agent.next` (1 = first).
 In `keys.json`, `agent.select:3` selects the third agent in that order.
+
+`pane.split` takes `left`, `right`, `up` or `down` and focuses the new pane.
+`left` and `up` place the new pane before the target.
 
 `pane.equalize` gives every split in the focused tab equal shares again,
 nested splits included. Pass `--tab <id>` (from `ls`) for another tab; an
@@ -71,11 +74,12 @@ without `--machine` still use this computer; `--machine ''` explicitly chooses i
 The agent menu checks and starts agents in the remote Unix user's
 login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.
-`terminal.open --folder /path --place down` starts the split in that folder,
-including when `--argv` supplies a program. Without `--folder`, it follows the
-focused terminal's folder. If an inherited local folder was deleted, new spaces,
-tabs and splits retry in that machine's home. An explicit invalid folder
-still fails.
+`terminal.open` defaults to a new tab. Use `--place left`, `right`, `up` or
+`down` to split the focused pane. For example, `terminal.open --folder /path --place up`
+starts the split in that folder, including when `--argv` supplies a program.
+Without `--folder`, it follows the focused terminal's folder. If an inherited
+local folder was deleted, new spaces, tabs and splits retry in that machine's
+home. An explicit invalid folder still fails.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
@@ -89,12 +93,29 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+Splitting or closing a pane keeps its row or column even if it was already
+even. It does not rebalance hand-resized runs or fixed-pixel slots. Set
+`pane_autobalance` to `false` in settings.json to disable this.
+
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
 the focused one) and its neighbor in a direction, or `target`, another pane of
 the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
 
 ```sh
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
+```
+
+`pane.move {pane?, tab | target, edge?}` moves a pane without stopping its
+terminal. Give either a tab ID (place it beside the focused pane there) or a
+pane ID as `target`. `edge` is left, right, up or down (default right; an
+explicit target in the same tab swaps when no edge is given). Cross-tab moves
+stay on the same machine, show the destination and close an emptied source tab
+or space. For a cross-tab terminal move, `pending: true` means the core has not
+confirmed it yet. Inspect `ls` to confirm the move. Moves to an edge apply
+`pane_autobalance` to the source and destination runs, even across tabs.
+
+```sh
+herdr-app do pane.move --pane p12 --tab tb7 --edge down
 ```
 
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,

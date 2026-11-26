@@ -56,7 +56,8 @@ export function playSound(sound: string): null;
  * Runs a command, the same ones keys.json binds (`herdr-app commands` lists them all with their
  * arguments). Structural commands fail while their machine's layout is unavailable.
  * Mod props are stored as given, never machine-qualified. Most commands apply right after
- * the call returns; terminal.keep/park finish in the background and toast on failure.
+ * the call returns; terminal.keep/park and cross-tab terminal pane moves finish in the
+ * background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
  * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?}, space.rename {id?, name},
@@ -68,12 +69,16 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ * Panes: pane.split {direction: "left" | "right" | "up" | "down", pane?} (focuses the new pane),
+ *   pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
+ *   pane.move {pane?, tab | target, edge?: "left" | "right" | "up" | "down"} (same machine;
+ *   right by default, or swap for a same-tab target without an edge; edge moves apply
+ *   pane_autobalance to the source and destination runs),
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target},
  *   pane.equalize {tab?}.
  *   Pane menus get target { pane, terminal }.
- * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
+ * Terminals: terminal.open {argv?, folder?, place?: "tab" | "left" | "right" | "up" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
@@ -175,6 +180,7 @@ export interface Program {
   agent: boolean;
 }
 
+/** Optional report fields come from the root (id-less) OSC 7501 report. Reports with an id are not included. */
 export interface AgentInfo {
   address: string;
   pane: string;
@@ -191,6 +197,14 @@ export interface AgentInfo {
   program: Program;
   /** The terminal's title. */
   title: string;
+  /** Short message from the report, if sent. */
+  msg?: string;
+  /** Reason from the report, if sent. Only sent when blocked. */
+  kind?: "permission" | "question" | "auth";
+  /** Progress (0..100), if sent. Only sent when working or blocked. */
+  progress?: number;
+  /** Title from the report, if sent. */
+  report_title?: string;
   /** Its pane's name (`pane.rename`), or null. */
   pane_name: string | null;
   /** Higher = changed more recently. */
@@ -271,8 +285,9 @@ export interface TerminalSelectionState {
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
- *  Implicit pane split/close/zoom/go/swap and terminal.show fail in that case, as do
- *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
+ *  Implicit pane split/close/move/zoom/go/swap and terminal.show fail in that case, as does
+ *  terminal.open with any split place or terminal.keep with place right/down.
+ *  An explicit pane id targets a model pane.
  *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
  *  the same way (`pane` and `shown` null); implicit pane commands still act on the
  *  focused pane under the window.

@@ -3,7 +3,7 @@
 //! how they're split. Plus which pane has focus and agent attention (done vs
 //! seen) with Herdr's rollup. Pure data; the window drives it.
 
-use crate::layout::{Axis, Content, Node};
+use crate::layout::{Axis, Content, Edge, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -329,17 +329,17 @@ impl Model {
     }
 
     /// Splits `target` (a pane) with a new terminal pane and focuses it.
-    pub fn split(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str) -> bool {
-        self.split_with(target, axis, pane(new_pane, address))
+    pub fn split(&mut self, target: &str, edge: Edge, new_pane: &str, address: &str, autobalance: bool) -> bool {
+        self.split_with(target, edge, pane(new_pane, address), autobalance)
     }
 
     /// Splits a pane with any block: a terminal, or a mod (a viewer beside the shell).
-    pub fn split_with(&mut self, target: &str, axis: Axis, block: Node) -> bool {
+    pub fn split_with(&mut self, target: &str, edge: Edge, block: Node, autobalance: bool) -> bool {
         let machine = self.space_of(target).and_then(|s| s.machine.clone());
         let container = self.fresh_id_on("s", machine.as_deref());
         let new_pane = block.id.clone();
         let Some(c) = self.tab_of_mut(target) else { return false };
-        if !c.root.split(target, axis, block, container) {
+        if !c.root.with_autobalance(target, Some(edge.axis()), autobalance, |root| root.split(target, edge, block, container)) {
             return false;
         }
         c.zoomed = None;
@@ -349,7 +349,7 @@ impl Model {
 
     /// Rearranges existing panes in one tab without changing their terminal addresses.
     /// No edge swaps their places; an edge places the source beside the target.
-    pub fn move_pane(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>) -> bool {
+    pub fn move_pane(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>, autobalance: bool) -> bool {
         if source == target {
             return false;
         }
@@ -359,15 +359,15 @@ impl Model {
         }
         let mut root = tab.root.clone();
         if let Some(edge) = edge {
-            use crate::layout::Edge;
-            let mut pane = root.remove(source).unwrap();
+            let mut pane = root.with_autobalance(source, None, autobalance, |root| root.remove(source)).unwrap();
             pane.size = None;
-            let axis = if matches!(edge, Edge::Left | Edge::Right) { Axis::Row } else { Axis::Column };
+            let after = if edge.vertical() { Edge::Right } else { Edge::Bottom };
             let machine = self.space_of(source).and_then(|s| s.machine.clone());
             let container = self.fresh_id_on("s", machine.as_deref());
-            if !root.split(target, axis, pane, container) {
+            if !root.with_autobalance(target, Some(edge.axis()), autobalance, |root| root.split(target, after, pane, container)) {
                 return false;
             }
+            // Split after, then swap: sizes stay with their slots.
             if matches!(edge, Edge::Left | Edge::Top) {
                 root.swap(source, target);
             }
@@ -400,9 +400,16 @@ impl Model {
     }
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
-    pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
-        let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
-        c.root.remove(pane_id);
+    pub fn remove_pane(&mut self, pane_id: &str, autobalance: bool) -> (bool, bool) {
+        let Some((_, Some(tab))) = self.take_pane(pane_id, autobalance) else { return (false, false) };
+        let (_, space_closed) = self.remove_tab(&tab);
+        (true, space_closed)
+    }
+
+    /// Takes a pane and reports a tab that needs closing, without closing it yet.
+    fn take_pane(&mut self, pane_id: &str, autobalance: bool) -> Option<(Node, Option<String>)> {
+        let c = self.tab_of_mut(pane_id)?;
+        let pane = c.root.with_autobalance(pane_id, None, autobalance, |root| root.remove(pane_id))?;
         // One pane left is all there is to show: the zoom ends with the split.
         if c.zoomed.as_deref() == Some(pane_id) || c.root.panes().len() < 2 {
             c.zoomed = None;
@@ -415,11 +422,53 @@ impl Model {
                 c.before.retain(|p| here.contains(p));
                 c.focused = c.before.pop().or_else(|| here.first().cloned());
             }
-            return (false, false);
+            return Some((pane, None));
         }
-        let id = c.id.clone();
-        let (_, space_closed) = self.remove_tab(&id);
-        (true, space_closed)
+        Some((pane, Some(c.id.clone())))
+    }
+
+    /// Moves a pane beside `target` in another tab. An emptied source tab closes,
+    /// as does its space if it was that space's last tab.
+    pub fn move_pane_to(&mut self, source: &str, target: &str, edge: Edge, autobalance: bool) -> bool {
+        let (Some(from), Some(to)) = (self.tab_of(source), self.tab_of(target)) else { return false };
+        if from.id == to.id || !to.root.find(target).is_some_and(Node::is_pane) {
+            return false;
+        }
+        let Some(mut pane) = from.root.find(source).filter(|n| n.is_pane()).cloned() else { return false };
+        let mut root = to.root.clone();
+        let after = if edge.vertical() { Edge::Right } else { Edge::Bottom };
+        let machine = self.space_of(target).and_then(|s| s.machine.clone());
+        let container = self.fresh_id_on("s", machine.as_deref());
+        pane.size = None;
+        if !root.with_autobalance(target, Some(edge.axis()), autobalance, |root| root.split(target, after, pane, container)) {
+            return false;
+        }
+        if matches!(edge, Edge::Left | Edge::Top) && !root.swap(source, target) {
+            return false;
+        }
+        let Some((_, empty)) = self.take_pane(source, autobalance) else { return false };
+        let Some(tab) = self.tab_of_mut(target) else { return false };
+        tab.root = root;
+        tab.zoomed = None;
+        if let Some(empty) = empty {
+            self.remove_tab(&empty);
+        }
+        self.focus_pane(source)
+    }
+
+    /// If a move's destination tab closed while relabeling, give the pane its own tab.
+    pub fn move_pane_to_new_tab(&mut self, pane: &str, space: &str, tab: &str, autobalance: bool) -> bool {
+        if self.space(space).is_none() || self.tab(tab).is_some() {
+            return false;
+        }
+        let Some((mut node, empty)) = self.take_pane(pane, autobalance) else { return false };
+        node.size = None;
+        self.add_tab(space, Tab::with_pane(tab, "", node));
+        // Add the destination first so the space survives when it also held the source.
+        if let Some(empty) = empty {
+            self.remove_tab(&empty);
+        }
+        self.select_tab(tab)
     }
 
     /// Removes a tab. Returns its terminal addresses and whether its space closed.
@@ -765,7 +814,7 @@ mod tests {
     fn tab_move_refuses_panes_and_containers_and_leaves_the_tabs_alone() {
         let mut m = Model::default();
         m.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
-        m.split("x1", crate::layout::Axis::Column, "x2", "t2");
+        m.split("x1", Edge::Bottom, "x2", "t2", true);
         m.add_tab("s1", Tab::new("c2", "", "x3", "t3"));
         // The column split wraps x1 and x2 in a container of their own, inside the tab's root.
         let inner = &m.tab("c1").unwrap().root.children()[0];
@@ -869,11 +918,11 @@ mod tests {
         m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
         m.add_space("p2", "web", "/src/web", Tab::new("c3", "deploy", "x3", "t3"));
         assert_eq!(m.active.as_deref(), Some("p2"));
-        assert_eq!(m.remove_pane("x3"), (true, true));
+        assert_eq!(m.remove_pane("x3", true), (true, true));
         assert_eq!(m.active.as_deref(), Some("p1"));
         assert_eq!(m.recent, [Recent { name: "web".into(), folder: "/src/web".into() }]);
         // A tab closes with its last pane; the space stays while it has another.
-        assert_eq!(m.remove_pane("x2"), (true, false));
+        assert_eq!(m.remove_pane("x2", true), (true, false));
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
         // Opening it again takes it off the recent list.
         m.add_space("p4", "web", "/src/web", Tab::new("c4", "x", "x4", "t4"));
@@ -884,15 +933,32 @@ mod tests {
     fn a_mod_is_a_pane_beside_terminals() {
         let mut m = model_with_one();
         let viewer = Node::block("x2", Content::Mod { name: "markdown".into(), props: json!({ "file": "README.md" }) });
-        assert!(m.split_with("x1", Axis::Row, viewer));
+        assert!(m.split_with("x1", Edge::Right, viewer, true));
         let c = m.tab("c1").unwrap();
         assert_eq!(c.root.panes().len(), 2);
         assert_eq!(c.focused.as_deref(), Some("x2"));
         // It has no terminal: nothing to restart or kill, and the tab survives
         // its terminal pane closing.
         assert_eq!(m.address_of("x2"), None);
-        assert_eq!(m.remove_pane("x1"), (false, false));
+        assert_eq!(m.remove_pane("x1", true), (false, false));
         assert_eq!(m.tab("c1").unwrap().root.panes().len(), 1);
+    }
+
+    #[test]
+    fn splitting_before_a_pane_autobalances_an_even_run() {
+        use crate::layout::Size;
+        // The first horizontal split shares the tab's existing weight of 1;
+        // the first vertical split makes a new run with two default weights.
+        for (after, before, total) in [(Edge::Right, Edge::Left, 1.0), (Edge::Bottom, Edge::Top, 2.0)] {
+            let mut m = model_with_one();
+            assert!(m.split("x1", after, "x2", "t2", true));
+            assert!(m.split("x2", before, "x3", "t3", true));
+            let root = &m.active_tab().unwrap().root;
+            let run = root.parent_of("x3").unwrap();
+            assert_eq!(run.axis(), Some(before.axis()));
+            assert_eq!(run.children().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["x1", "x3", "x2"]);
+            assert!(run.children().iter().all(|p| p.size == Some(Size::Weight { weight: total / 3.0 })));
+        }
     }
 
     #[test]
@@ -900,9 +966,9 @@ mod tests {
         use crate::layout::Edge;
         for edge in [None, Some(Edge::Left), Some(Edge::Right), Some(Edge::Top), Some(Edge::Bottom)] {
             let mut m = model_with_one();
-            m.split("x1", Axis::Row, "x2", "t2");
-            m.split("x2", Axis::Column, "x3", "t3");
-            assert!(m.move_pane("x1", "x3", edge));
+            m.split("x1", Edge::Right, "x2", "t2", true);
+            m.split("x2", Edge::Bottom, "x3", "t3", true);
+            assert!(m.move_pane("x1", "x3", edge, true));
             assert_eq!(m.focused_pane().as_deref(), Some("x1"));
             for (pane, address) in [("x1", "t1"), ("x2", "t2"), ("x3", "t3")] {
                 assert_eq!(m.address_of(pane).as_deref(), Some(address));
@@ -923,13 +989,39 @@ mod tests {
     }
 
     #[test]
+    fn pane_moves_autobalance_both_even_runs() {
+        use crate::layout::{Edge, Size};
+        for (enabled, source_weights, target_weights) in [
+            (true, [1.5; 2], [2.0 / 3.0; 3]),
+            (false, [1.0, 2.0], [0.5, 0.5, 1.0]),
+        ] {
+            let mut m = model_with_one();
+            let source = Node::container("source", Axis::Row, vec![pane("a", "t1"), pane("b", "t2"), pane("c", "t3")]);
+            let target = Node::container("target", Axis::Row, vec![pane("d", "t4"), pane("e", "t5")]);
+            m.tab_mut("c1").unwrap().root = Node::container("c1", Axis::Column, vec![source, target]);
+            assert!(m.move_pane("c", "d", Some(Edge::Right), enabled));
+            let root = &m.active_tab().unwrap().root;
+            for (id, ids, expected) in [("source", &["a", "b"][..], &source_weights[..]), ("target", &["d", "c", "e"][..], &target_weights[..])] {
+                let children = root.find(id).unwrap().children();
+                assert_eq!(children.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ids);
+                let weights = children.iter().map(|p| match p.size {
+                    Some(Size::Weight { weight }) => weight,
+                    None => 1.0,
+                    _ => panic!("unexpected fixed-pixel pane"),
+                }).collect::<Vec<_>>();
+                assert_eq!(weights, expected);
+            }
+        }
+    }
+
+    #[test]
     fn cross_axis_pane_moves_split_equally_not_with_the_old_slot_size() {
         use crate::layout::{Edge, Size};
         for old_size in [Some(Size::Weight { weight: 0.5 }), Some(Size::Px { px: 200. })] {
             let mut m = model_with_one();
-            m.split("x1", Axis::Row, "x2", "t2");
+            m.split("x1", Edge::Right, "x2", "t2", true);
             m.tab_of_mut("x2").unwrap().root.find_mut("x2").unwrap().size = old_size;
-            assert!(m.move_pane("x2", "x1", Some(Edge::Bottom)));
+            assert!(m.move_pane("x2", "x1", Some(Edge::Bottom), true));
             let parent = m.active_tab().unwrap().root.parent_of("x2").unwrap();
             assert_eq!(parent.children()[0].size, None);
             assert_eq!(parent.children()[1].size, None);
@@ -942,9 +1034,95 @@ mod tests {
         m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
         let before = format!("{:?}", m.spaces);
         for (source, target) in [("x1", "x1"), ("x1", "missing"), ("missing", "x1"), ("x1", "x2"), ("c1", "x1")] {
-            assert!(!m.move_pane(source, target, None));
+            assert!(!m.move_pane(source, target, None, true));
             assert_eq!(format!("{:?}", m.spaces), before);
         }
+    }
+
+    #[test]
+    fn a_pane_moves_to_another_tab_and_its_emptied_tab_closes() {
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
+        m.add_tab("p1", Tab::new("c3", "last", "x3", "t3"));
+        m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap().title = Some("build".into());
+        m.settle("c2", 5);
+        assert!(m.move_pane_to("x1", "x2", Edge::Right, true));
+        assert_eq!(m.tab_of("x1").unwrap().id, "c2");
+        assert!(m.tab("c1").is_none());
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        let tab = m.tab("c2").unwrap();
+        assert_eq!(tab.settled, None);
+        assert_eq!(tab.root.find("x1").unwrap().title.as_deref(), Some("build"));
+        let ids: Vec<&str> = tab.root.panes().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["x2", "x1"]);
+        // An edge places it there; a mod pane moves like a terminal's.
+        let viewer = Node::block("x4", Content::Mod { name: "markdown".into(), props: json!({}) });
+        assert!(m.split_with("x3", Edge::Right, viewer, true));
+        assert!(m.move_pane_to("x4", "x1", Edge::Left, true));
+        let c = m.tab("c2").unwrap();
+        assert_eq!(c.root.parent_of("x4").unwrap().axis(), Some(Axis::Row));
+        let ids: Vec<&str> = c.root.panes().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["x2", "x4", "x1"]);
+    }
+
+    #[test]
+    fn moving_between_tabs_autobalances_both_even_runs() {
+        use crate::layout::Size;
+        for (enabled, source_weights, target_weights) in [
+            (true, [1.5; 2], [2.0 / 3.0; 3]),
+            (false, [1.0, 2.0], [0.5, 0.5, 1.0]),
+        ] {
+            let mut m = model_with_one();
+            m.add_tab("p1", Tab::new("c2", "docs", "d", "t4"));
+            m.tab_mut("c1").unwrap().root = Node::container("c1", Axis::Row, vec![pane("a", "t1"), pane("b", "t2"), pane("c", "t3")]);
+            m.tab_mut("c2").unwrap().root = Node::container("c2", Axis::Row, vec![pane("d", "t4"), pane("e", "t5")]);
+            assert!(m.move_pane_to("c", "d", Edge::Left, enabled));
+            for (id, ids, expected) in [("c1", &["a", "b"][..], &source_weights[..]), ("c2", &["c", "d", "e"][..], &target_weights[..])] {
+                let children = m.tab(id).unwrap().root.children();
+                assert_eq!(children.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ids);
+                let weights = children.iter().map(|p| match p.size {
+                    Some(Size::Weight { weight }) => weight,
+                    None => 1.0,
+                    _ => panic!("unexpected fixed-pixel pane"),
+                }).collect::<Vec<_>>();
+                assert_eq!(weights, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn moving_a_tabs_last_pane_closes_it_and_then_its_space() {
+        let mut m = model_with_one();
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "deploy", "x2", "t2"));
+        assert!(m.move_pane_to("x2", "x1", Edge::Bottom, true));
+        assert!(m.tab("c2").is_none());
+        assert!(m.space("p2").is_none());
+        assert_eq!(m.recent, [Recent { name: "web".into(), folder: "/src/web".into() }]);
+        assert_eq!(m.tab("c1").unwrap().root.parent_of("x2").unwrap().axis(), Some(Axis::Column));
+        assert_eq!(m.address_of("x2").as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn a_pane_cannot_move_to_its_own_tab_or_nowhere() {
+        let mut m = model_with_one();
+        m.split("x1", Edge::Right, "x9", "t9", true);
+        let before = format!("{:?}", m.spaces);
+        for (source, target) in [("x1", "x9"), ("x1", "x1"), ("x1", "missing"), ("missing", "x9"), ("c1", "x9")] {
+            assert!(!m.move_pane_to(source, target, Edge::Right, true), "{source} -> {target}");
+            assert_eq!(format!("{:?}", m.spaces), before);
+        }
+    }
+
+    #[test]
+    fn recreating_a_missing_destination_tab_keeps_its_space() {
+        let mut m = model_with_one();
+        assert!(m.move_pane_to_new_tab("x1", "p1", "closed", true));
+        assert!(m.tab("c1").is_none());
+        assert_eq!(m.active_space().unwrap().id, "p1");
+        assert_eq!(m.active_tab().unwrap().id, "closed");
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert!(m.recent.is_empty());
     }
 
     #[test]
@@ -960,8 +1138,8 @@ mod tests {
 
     fn three_panes_and_another_tab() -> Model {
         let mut m = model_with_one();
-        m.split("x1", Axis::Row, "x2", "t2");
-        m.split("x2", Axis::Row, "x3", "t3");
+        m.split("x1", Edge::Right, "x2", "t2", true);
+        m.split("x2", Edge::Right, "x3", "t3", true);
         m.add_tab("p1", Tab::new("c2", "docs", "x4", "t4"));
         m.select_tab("c1");
         m.focus_pane("x1");
@@ -1013,9 +1191,9 @@ mod tests {
     #[test]
     fn splits_focus_the_new_pane_and_closing_it_moves_focus() {
         let mut m = model_with_one();
-        assert!(m.split("x1", Axis::Row, "x9", "t9"));
+        assert!(m.split("x1", Edge::Right, "x9", "t9", true));
         assert_eq!(m.focused_pane().as_deref(), Some("x9"));
-        assert_eq!(m.remove_pane("x9"), (false, false));
+        assert_eq!(m.remove_pane("x9", true), (false, false));
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         // The arrangement keeps the tab's id with one pane left.
         assert_eq!(m.active_tab().unwrap().root.id, "c1");
@@ -1024,22 +1202,22 @@ mod tests {
     #[test]
     fn closing_the_focused_pane_goes_back_to_the_one_before() {
         let mut m = model_with_one();
-        m.split("x1", Axis::Row, "x2", "t2");
-        m.split("x2", Axis::Row, "x3", "t3");
+        m.split("x1", Edge::Right, "x2", "t2", true);
+        m.split("x2", Edge::Right, "x3", "t3", true);
         // From x2 to x3; closing x3 lands on x2, not on the first pane.
-        m.remove_pane("x3");
+        m.remove_pane("x3", true);
         assert_eq!(m.focused_pane().as_deref(), Some("x2"));
         // Clicked around: x1, then x2; close x2 and it's x1.
-        m.split("x2", Axis::Row, "x4", "t4");
+        m.split("x2", Edge::Right, "x4", "t4", true);
         m.focus_pane("x1");
         m.focus_pane("x4");
-        m.remove_pane("x4");
+        m.remove_pane("x4", true);
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         // The one before is gone too: the next one back that's still there.
-        m.split("x2", Axis::Row, "x5", "t5");
+        m.split("x2", Edge::Right, "x5", "t5", true);
         m.focus_pane("x2");
-        m.remove_pane("x5");
-        m.remove_pane("x2");
+        m.remove_pane("x5", true);
+        m.remove_pane("x2", true);
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
     }
 
@@ -1088,7 +1266,7 @@ mod tests {
     #[test]
     fn focusing_another_pane_in_a_zoomed_tab_moves_the_zoom() {
         let mut m = model_with_one();
-        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        assert!(m.split("x1", Edge::Right, "x2", "t2", true));
         m.tab_mut("c1").unwrap().zoomed = Some("x2".into());
         assert!(m.focus_pane("x1"));
         assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
@@ -1103,7 +1281,7 @@ mod tests {
         let mut m = model_with_one();
         // A tab with one pane doesn't zoom.
         assert!(!m.toggle_zoom("x1"));
-        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        assert!(m.split("x1", Edge::Right, "x2", "t2", true));
         assert!(m.focus_pane("x2"));
         // Zooming the other pane (its header's button) shows it and gives it the keyboard.
         assert!(m.toggle_zoom("x1"));
@@ -1119,14 +1297,24 @@ mod tests {
     #[test]
     fn a_tab_left_with_one_pane_is_not_zoomed() {
         let mut m = model_with_one();
-        m.split("x1", Axis::Row, "x2", "t2");
-        m.split("x2", Axis::Row, "x3", "t3");
+        m.split("x1", Edge::Right, "x2", "t2", true);
+        m.split("x2", Edge::Right, "x3", "t3", true);
         // A hidden pane closes (its program exits): two are left, x1 stays zoomed.
         assert!(m.toggle_zoom("x1"));
-        m.remove_pane("x3");
+        m.remove_pane("x3", true);
         assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
         // The last hidden pane closes: x1 is the tab's only pane, with nothing to unzoom to.
-        m.remove_pane("x2");
+        m.remove_pane("x2", true);
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
+    }
+
+    #[test]
+    fn moving_the_last_hidden_pane_ends_zoom_in_its_source_tab() {
+        let mut m = model_with_one();
+        assert!(m.split("x1", Edge::Right, "x2", "t2", true));
+        assert!(m.add_tab("p1", Tab::new("c2", "", "x3", "t3")));
+        assert!(m.toggle_zoom("x1"));
+        assert!(m.move_pane_to("x2", "x3", Edge::Right, true));
         assert_eq!(m.tab("c1").unwrap().zoomed, None);
     }
 

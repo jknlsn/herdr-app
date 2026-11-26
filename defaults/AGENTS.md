@@ -122,7 +122,7 @@ the highlighted line shows where it will land.
   If starting in an inherited folder fails, new spaces, tabs and splits retry in
   that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
-  split right and down. One nobody named is called by its place (1, 2,
+  split. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
@@ -150,8 +150,8 @@ the highlighted line shows where it will land.
   Labels use ids local to that machine; remote ids shown by the app have a
   `<machine>/` prefix (strip it when writing labels on that machine). Adoption
   also enables core keep; `terminal.park` removes the pane and disables keep.
-  When a core change is needed, `terminal.keep` / `terminal.park` acknowledge
-  with `pending: true`, then apply after the machine replies; failures show a toast.
+  `terminal.keep`, `terminal.park` and cross-tab terminal `pane.move` can return
+  `pending: true`: they apply after the machine replies. Failures show a toast.
   Normal quit waits for pending terminal changes and layout writes; remote waits are bounded.
   An id Herdr doesn't know becomes a new space or tab (unnamed: Herdr's names).
   Terminals without the labels (another app's) stay out of Herdr's
@@ -622,8 +622,12 @@ The main ones:
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
-- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+- Panes: `pane.split {direction: "left" | "right" | "up" | "down", pane?, argv? | mod?, props?}` (a new
+  terminal or mod pane takes focus; left and up insert before the target), `pane.close {pane?}`,
+  `pane.move {pane?, tab | target, edge?}` (move beside the tab's focused pane or an explicit
+  target; `edge` is left, right, up or down, default right; an explicit target in the same
+  tab without an edge swaps). A pane stays on its own machine and its terminal keeps running.
+  A cross-tab move shows the destination and closes an emptied source tab or space.
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -644,16 +648,18 @@ The main ones:
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
-  While a layout terminal block is focused, implicit split/close/zoom/go/swap and
-  `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
+  While a layout terminal block is focused, implicit split/close/move/zoom/go/swap and
+  `terminal.show` fail, as does `terminal.open` with any split place or `terminal.keep`
+  with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
   Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
   children and keeps children started with `--outlive-parent` running.
   On cores older than 0.1.13, Herdr ends hidden children too, stopping at
   children with a pane or `herdr.space` label.
-- Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`),
+- Terminals: `terminal.open {argv?, folder?, place?, name?}` (place: `tab` by default,
+  or `left`, `right`, `up`, `down` from the focused pane. `folder` sets the starting
+  directory for tabs and splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
   pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
@@ -860,6 +866,15 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `pane_autobalance` (default `true`, Settings → Look): when a pane is split
+  or closed, keep its row or column even if it was even before. Same-axis
+  subtrees count by pane, perpendicular subtrees count as one, and fixed-pixel
+  slots are skipped. If the divider positions were uneven, a split takes half
+  the target's share and a close gives the freed share to the previous neighbor
+  (or the next if it was first). Dragging a pane to an edge or using `pane.move`
+  to place it beside another pane applies the same rule to the source and
+  destination runs, even across tabs. Set `false` to always use the old split
+  and close behavior.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
